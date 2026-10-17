@@ -116,6 +116,8 @@ function envBool(name: string, fallback: boolean): boolean {
 export const server = {
   host: env('HOST', '0.0.0.0'),
   port: envInt('PORT', 8080),
+  /** 端口被占用时自动递增（PORT、PORT+1…）；设 false 则撞端口即失败 */
+  portAutoIncrement: envBool('PORT_AUTO_INCREMENT', true),
 };
 
 /**
@@ -386,7 +388,8 @@ export const isDev = env('NODE_ENV', 'development') !== 'production';
 /** 启动时打印生效配置（不含密钥明文） */
 export function describeConfig(): Record<string, unknown> {
   return {
-    server: `${server.host}:${server.port}`,
+    // 由 start.ts 打印真实监听端口（可能是递增后的），这里不重复
+    server: server.port,
     logshare: logshare.enabled ? logshare.internalUrl : '(独立运行模式)',
     db: db.enabled ? `${db.user}@${db.host}:${db.port}/${db.database} (只读)` : '(未配置)',
     redis: redis.enabled ? `${redis.host}:${redis.port} prefix=${redis.prefix}` : '(未配置，降级)',

@@ -370,6 +370,29 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 `dist/server.js`；用根 `tsconfig.json` 编译会得到 `dist/src/server.js`，
 `npm start` 会直接失败。
 
+### 重启时的端口占用（不是缺陷，是时序）
+
+**现象**：重启服务报 `listen EADDRINUSE`，或看起来「服务没起来」。
+
+三个因素叠加，缺一不可：① `kill` 后进程未必立刻退出（原先**没有信号处理**，
+靠 Node 默认行为，实测滞后数秒）；② 冷启动要 **6–10 秒**（langchain 那一串依赖）
+才监听，期间端口不可连、无任何输出；③ 手写 `kill && sleep 2 && start` 不确认
+进程消失、不确认端口释放，失败还被 `>log 2>&1` 吞掉。
+
+**现在的做法**：
+- `src/server/start.ts` 接管启动：**端口占用时自动递增**（`PORT`、`PORT+1`…，
+  上限 20 个；`PORT_AUTO_INCREMENT=0` 可关闭），并打印 `READY port=<真实端口>`
+  单行标记供脚本判断就绪。**信号处理必须在打印 READY 之前安装**——
+  否则外部脚本看到 READY 就 `kill`，会赶上信号还没接上的窗口（测试抓到过这个竞态）。
+- SIGTERM/SIGINT 优雅退出：停止接新连接 → `closeAllConnections` → 关 SQLite →
+  关 worker 池 → 退出；5 秒硬超时兜底，二次信号立即强制退出。实测释放端口 **55ms**。
+- `scripts/restart.sh`：等「进程消失」「端口释放」两个事实，再等 `READY`，最后校验
+  `/health`，全程不猜时长。
+
+**另一个坑**：`pkill -9 -f "dist/server.js"` 会连执行它的 shell 一起杀
+（命令行里含该字符串），表现为命令莫名 `Killed`。改用 pidfile 或
+`ps -ef | grep ... | grep -v grep` 逐个 kill。
+
 ### 前端托管：路径遍历用「结构性不可能」而不是「尝试拦截」
 
 `src/server/static.ts` 里只有一个目录会真正读盘：`assets/`，且文件名必须匹配
@@ -434,10 +457,11 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（后端 29 个文件 336 项 + 前端 web/tests 15 项）
+npm test                    # 全部单元测试（后端 30 个文件 341 项 + 前端 web/tests 15 项）
 npm run test:web            # 只跑前端测试（SSE 增量解析）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
+bash scripts/restart.sh     # 重启服务（等端口释放 + 等 READY + 校验 /health，不靠 sleep 猜）
 npx tsx src/rag/build-cli.ts    # 重建知识库索引（./knowledge → ./data/rag/index.db）
 npx tsx scripts/smoke-deepagent.ts   # DeepAgents 冒烟测试
 npx tsx scripts/verify-anchor.ts <日志目录>    # 窗口锚点验证

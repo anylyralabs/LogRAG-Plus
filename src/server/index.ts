@@ -6,7 +6,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import { describeConfig, server as serverCfg, isDev, security, defaultProvider, agent as agentCfg } from '../config.ts';
+import { describeConfig, isDev, security, defaultProvider, agent as agentCfg } from '../config.ts';
 import { SseWriter } from './sse.ts';
 import { resolveClientIp } from '../security/clientIp.ts';
 import { runAgent } from '../agent/runner.ts';
@@ -40,7 +40,7 @@ import {
   type EntryKind,
 } from '../knowledge/domain.ts';
 import { adminActor, checkAdmin } from '../security/adminAuth.ts';
-import { serveWeb, webBuilt, webDir } from './static.ts';
+import { serveWeb } from './static.ts';
 import {
   analysisStats,
   countAnalysisRecords,
@@ -1149,7 +1149,7 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
  * 用 `unref()` 释放事件循环引用，避免测试或 CLI 场景下进程被定时器挂住。
  * 清理失败只记日志不抛出——回收是维护动作，不该影响请求处理。
  */
-function startSessionCleanup(): void {
+export function startSessionCleanup(): void {
   const run = (): void => {
     try {
       const removed = cleanupExpired();
@@ -1163,32 +1163,4 @@ function startSessionCleanup(): void {
 
   run(); // 启动时先清一次（进程可能已长时间未重启）
   setInterval(run, CLEANUP_INTERVAL_MS).unref();
-}
-
-/** 启动服务 */
-export function startServer(): Server {
-  const server = createHttpServer();
-  server.listen(serverCfg.port, serverCfg.host, () => {
-    console.log('═══ LogRAG+ 服务已启动 ═══');
-    for (const [k, v] of Object.entries(describeConfig())) {
-      console.log(`  ${k.padEnd(18)} ${String(v)}`);
-    }
-    console.log(`\n  监听: http://${serverCfg.host}:${serverCfg.port}`);
-    console.log(`  健康检查: http://${serverCfg.host}:${serverCfg.port}/health`);
-    // 前端是要单独构建的产物：没构建时服务照常可用（纯 API），
-    // 但必须**明确说出来**，否则用户打开 /logshare/ 看到 404 会以为服务坏了。
-    console.log(
-      webBuilt()
-        ? `  前端页面: http://${serverCfg.host}:${serverCfg.port}/logshare/`
-        : `  前端页面: 未构建（先在 web/ 下执行 npm run build；产物目录 ${webDir()}）`,
-    );
-    console.log('');
-  });
-  startSessionCleanup();
-  return server;
-}
-
-// 直接运行时启动
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startServer();
 }
