@@ -1,0 +1,557 @@
+/**
+ * 基础层：重置、共享件、prose、日志排版、无障碍地板。
+ *
+ * 这里放的是「所有页面都要用」的东西。组件自己的样式写在组件内（scoped），
+ * 但凡是两处以上会重复的（发丝线、严重度脊、药丸、按钮），一律上收到这里——
+ * 否则它们会各自演化出三套差不多的实现，那正是上一版的问题之一。
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  /* 移动端 WebView 里横向跳动比「字号被放大」更烦人 */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-text);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 安全区：手机浏览器底部工具栏会盖住输入区 */
+  overflow-wrap: break-word;
+}
+
+::selection {
+  background: var(--accent-quiet);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 键盘可达但不想让鼠标点击也闪焦点环 */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: var(--s5) 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* ── 排版工具 ─────────────────────────────────────────── */
+
+.mono {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+/* 元信息行：mono、小、三级灰。用于时间戳、字节数、工具名、ID */
+.meta {
+  font-family: var(--font-display);
+  font-size: var(--t-caption);
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--text-2);
+}
+
+.clamp-1 {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 结构件 ───────────────────────────────────────────── */
+
+/* 发丝线列表：这是本设计的「卡片」。行与行之间只有一条线，没有圆角与阴影 */
+.hair {
+  border-top: 1px solid var(--line);
+}
+
+.hair:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+/* 严重度脊：4px 竖条。颜色是信息（错误/警告/提示/正常），不是装饰 */
+.rail {
+  position: relative;
+  padding-left: var(--s4);
+}
+
+.rail::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--rail, var(--line-3));
+}
+
+.rail--error {
+  --rail: var(--sev-error);
+}
+.rail--warn {
+  --rail: var(--sev-warn);
+}
+.rail--info {
+  --rail: var(--sev-info);
+}
+.rail--ok {
+  --rail: var(--sev-ok);
+}
+.rail--accent {
+  --rail: var(--accent);
+}
+
+/* 状态点：小而实，配 mono 文本。悬停有 title 就够，不做 tooltip 组件 */
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--dot, var(--text-3));
+  vertical-align: middle;
+  flex: none;
+}
+
+.dot--error {
+  --dot: var(--sev-error);
+}
+.dot--warn {
+  --dot: var(--sev-warn);
+}
+.dot--ok {
+  --dot: var(--sev-ok);
+}
+.dot--info {
+  --dot: var(--sev-info);
+}
+.dot--accent {
+  --dot: var(--accent);
+}
+
+/* ── 按钮 ─────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--btn-line);
+  border-radius: var(--r1);
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  font-size: var(--t-small);
+  line-height: 1;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+@media (hover: hover) {
+  .btn:hover {
+    background: var(--btn-bg-hover);
+    border-color: var(--line-3);
+  }
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--primary-bg);
+  border-color: var(--primary-bg);
+  color: var(--primary-text);
+  font-weight: 500;
+}
+
+@media (hover: hover) {
+  .btn--primary:hover {
+    background: var(--primary-bg-hover);
+    border-color: var(--primary-bg-hover);
+  }
+}
+
+.btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+}
+
+@media (hover: hover) {
+  .btn--quiet:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+}
+
+.btn--danger {
+  color: var(--sev-error);
+  border-color: var(--line-2);
+}
+
+@media (hover: hover) {
+  .btn--danger:hover {
+    background: var(--sev-error-wash);
+    border-color: var(--sev-error);
+  }
+}
+
+/* 触控目标：移动端按钮不该小于 40px 高 */
+@media (pointer: coarse) {
+  .btn {
+    height: 38px;
+    padding: 0 var(--s4);
+  }
+}
+
+/* 纯图标按钮 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r1);
+  color: var(--text-2);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+@media (hover: hover) {
+  .icon-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+}
+
+@media (pointer: coarse) {
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+/* ── 药丸与徽章 ───────────────────────────────────────── */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 22px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--chip-line);
+  border-radius: var(--r-pill);
+  background: var(--chip-bg);
+  font-family: var(--font-display);
+  font-size: var(--t-caption);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.pill--error {
+  color: var(--sev-error);
+  border-color: var(--sev-error);
+  background: var(--sev-error-wash);
+}
+.pill--warn {
+  color: var(--sev-warn);
+  border-color: var(--sev-warn);
+  background: var(--sev-warn-wash);
+}
+.pill--ok {
+  color: var(--sev-ok);
+  border-color: var(--sev-ok);
+  background: var(--sev-ok-wash);
+}
+.pill--accent {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-quiet);
+}
+
+/* ── 表单 ─────────────────────────────────────────────── */
+
+.field {
+  display: block;
+}
+
+.field__label {
+  display: block;
+  font-family: var(--font-display);
+  font-size: var(--t-caption);
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  margin-bottom: var(--s2);
+}
+
+.input,
+.textarea {
+  width: 100%;
+  padding: var(--s3);
+  border: 1px solid var(--input-line);
+  border-radius: var(--r1);
+  background: var(--input-bg);
+  font-size: var(--t-small);
+  line-height: 1.55;
+}
+
+.input:focus-visible,
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 88px;
+  font-family: var(--font-log);
+  font-size: var(--t-caption);
+}
+
+.hint {
+  font-size: var(--t-caption);
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
+/* ── 表格（管理面）────────────────────────────────────── */
+
+.table {
+  font-size: var(--t-small);
+}
+
+.table th {
+  text-align: left;
+  font-family: var(--font-display);
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  padding: var(--s3) var(--s3);
+  border-bottom: 1px solid var(--line-2);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: var(--s3);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.table tbody tr:hover td {
+  background: var(--surface-2);
+}
+
+/* 数字列右对齐 + 等宽：这一条让「一眼比大小」成立 */
+.table .num {
+  text-align: right;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 日志排版 ─────────────────────────────────────────── */
+
+/**
+ * 日志行。等宽、不折行（横向滚动由容器负责）、行号在左槽。
+ *
+ * 关键点：**不要**用 `white-space: pre-wrap` 自己折行。日志的缩进本身
+ * 就是信息（堆栈层级、`Caused by` 嵌套），折行会把它毁掉；横向滚动虽然
+ * 在手机上是缺点，但「折了读不懂」比「要滑一下」严重得多。
+ */
+.log-line {
+  display: flex;
+  gap: var(--s3);
+  font-family: var(--font-log);
+  font-size: var(--t-caption);
+  line-height: var(--lh-log);
+  white-space: pre;
+  min-width: max-content;
+}
+
+.log-line__no {
+  flex: none;
+  width: 3.6em;
+  text-align: right;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  border-right: 1px solid var(--line);
+  padding-right: var(--s3);
+}
+
+.log-line__text {
+  flex: 1;
+}
+
+/**
+ * 严重度只落在**行号槽**上（外加错误行的极浅底），不上整行底色。
+ *
+ * 这是看过真实日志之后改的：一份 2604 行的日志里有 291 行 WARN，若 WARN 也铺
+ * 底色，屏幕上会有一成以上的行带颜色——**高亮的行一多，高亮就等于没有**。
+ * 行号槽里换个颜色既够醒目，又不侵占正文的阅读面。
+ */
+.log-line--warn .log-line__no {
+  color: var(--sev-warn);
+}
+
+.log-line--error .log-line__no {
+  color: var(--sev-error);
+  font-weight: 500;
+}
+
+.log-line--error {
+  background: var(--sev-error-wash);
+  /* 指尖宽度的一条竖标，像编辑器在行号槽标出错误行 */
+  box-shadow: inset 3px 0 0 var(--sev-error);
+}
+
+.log-line--error .log-line__text {
+  color: var(--text);
+}
+
+.log-line--dim .log-line__text {
+  color: var(--text-2);
+}
+
+/* 被指认（选中引用）的行 */
+.log-line--picked {
+  background: var(--accent-quiet);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* ── 滚动条 ───────────────────────────────────────────── */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-3) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--line-3);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-pill);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 无障碍地板 ───────────────────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 打印：去掉底色与固定定位，日志要能打印出来给人看 */
+@media print {
+  .rig,
+  .composer {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+    color: #000;
+  }
+}

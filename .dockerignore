@@ -1,0 +1,37 @@
+# 构建上下文排除项（compose 里 context 是仓库根，故本文件也放在仓库根）
+#
+# **最关键的一条是 `.env`**：它含 AI key、LogShare 内部令牌、管理令牌。
+# 进入构建上下文就等于有可能被 `COPY . .` 写进镜像层——镜像会推到仓库、被拉取、
+# 被 `docker history` 翻出来。它的值只在**运行时**通过 `env_file` 注入，
+# 构建期一个都不需要。
+.env
+.env.local
+
+# 依赖与产物：镜像里由各自阶段重新生成
+node_modules/
+**/node_modules/
+dist/
+web/dist/
+
+# 本地状态与语料
+data/
+tmp/
+*.log
+coverage/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.gitattributes
+.DS_Store
+
+# 文档不参与运行
+docs/
+
+# 测试不参与运行
+tests/
+web/tests/
+
+# 注意：**不要**忽略 `*.md`。`prompts/` 与 `knowledge/` 里全是 Markdown，
+# 它们是要 COPY 进镜像的运行时资产——一条 `*.md` 排除会让镜像里的知识库变成空目录，
+# 而表现只是「检索永远无结果」，不会报任何错。（写这个文件时差点踩到。）

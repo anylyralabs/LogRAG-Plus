@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      移动优先：产品的主要使用者是从手机启动器（FCL / ZL2 / Pojav 等）跳转过来的
+      Minecraft 玩家，viewport 必须允许安全区适配（刘海屏底部输入框会被遮）。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0e1218" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#eceef2" media="(prefers-color-scheme: light)" />
+    <meta
+      name="description"
+      content="把 Minecraft 崩溃日志贴进来，得到有依据、能照着做的排障结论。"
+    />
+    <title>LogRAG+ 日志排障</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

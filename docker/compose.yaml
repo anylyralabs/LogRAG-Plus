@@ -1,0 +1,56 @@
+# LogRAG+ 单服务编排
+#
+# ⚠️ 同 Dockerfile：**尚未在真实 Docker 中验证**（开发机无容器运行时）。
+#
+# 定位：只管**本服务**。TLS、域名、WAF、限流都在既有反代那一层（与 LogShare 同一台
+# 服务器时就是现成的 nginx 容器），这里刻意不重复一套——两份入口配置必然各自演化，
+# 而「证书路径写错」这类问题只有在线上才会被发现。
+#
+# 首次部署：
+#   1. 在仓库根准备好 `.env`（本文件用 env_file 读取；它已被 gitignore）
+#   2. 确认 `data/rag/index.db` 存在（不存在则先在宿主机 `npx tsx src/rag/build-cli.ts`）
+#   3. docker compose -f docker/compose.yaml up -d --build
+#   4. 在反代里把 agent.logshare.cn 指到 127.0.0.1:8788
+#
+# 端口刻意只绑回环：反代与服务同机，绑 0.0.0.0 等于把无鉴权的接口直接暴露到公网。
+# 若反代在另一个容器里，删掉 ports、改用下方注释的 networks（用容器名互访）。
+
+services:
+  lograg:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: lograg-plus:latest
+    restart: unless-stopped
+
+    # `.env` 里的值原样注入（AI key、LogShare 内部令牌、管理令牌都在里面）
+    env_file:
+      - ../.env
+
+    # 容器内路径覆盖宿主机的相对路径：宿主 `.env` 写的是 `./data`，
+    # 在容器里必须指到挂载点，否则会写进镜像层（重启即丢）。
+    environment:
+      DATA_DIR: /app/data
+      WEB_DIR: /app/web/dist
+      RAG_INDEX_PATH: /app/rag-index/index.db
+
+    ports:
+      - "127.0.0.1:8788:8788"
+
+    volumes:
+      # 会话/上传副本/分析记录：必须持久化，否则容器重建即丢
+      - lograg-data:/app/data
+      # RAG 索引：只读挂入。索引是构建产物，由宿主机重建后本服务自动感知
+      # （search.ts 按 mtime 变更重连），因此不需要重启容器。
+      - ../data/rag/index.db:/app/rag-index/index.db:ro
+
+    # 反代在别的容器时启用（把 logshare_default 换成实际网络名）：
+    # networks:
+    #   - logshare_default
+
+volumes:
+  lograg-data:
+
+# networks:
+#   logshare_default:
+#     external: true
