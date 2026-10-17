@@ -90,6 +90,23 @@ export function safeJson(raw: string): unknown | null {
   }
 }
 
+/**
+ * 稳定序列化：键按字典序排列。
+ *
+ * 为什么不能用 `JSON.stringify` 直接比：同一组参数在不同轮次里键序可能不同
+ * （`{"a":1,"b":2}` 与 `{"b":2,"a":1}`），语义相同但字符串不同，
+ * 于是「原地打转」永远检测不出来——这正是那种「看起来守住了、其实没有」的坑。
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
+
 export class ToolCallTracker {
   /** 分片累积条目，键为 `index`（分片必带）或高位合成的独立键 */
   readonly #pending = new Map<number, TrackedCall>();
@@ -101,10 +118,47 @@ export class ToolCallTracker {
   #syntheticKey = 1000;
   /** 已宣告的调用次数（即「轮次」） */
   #count = 0;
+  /** 已宣告调用的指纹序列（用于识别「原地打转」） */
+  readonly #signatures: string[] = [];
+
+  /**
+   * 连续重复同一次调用的轮数上限。
+   *
+   * 依据：生产语料里 `fw79h8D` 用 97 轮、96 次工具调用得出一个 78 分的结论，
+   * `L8oLvgg` 51 轮、`uenGF42` 43 轮——851 条低分记录中有 **255 条是轮次 ≥10**，
+   * 且 `overall` 清一色钉在 78（效率分 0）。它们不是「想得深」，
+   * 而是**在同一个地方反复问同一个问题**。
+   *
+   * 3 次是保守值：真正需要多次读同一份日志的场景（先 grep 定位、再按行读、
+   * 再换关键词 grep）参数一定不同；参数完全相同的第 3 次几乎必然是空转。
+   */
+  static readonly REPEAT_LIMIT = 3;
 
   /** 已宣告的调用次数 */
   get count(): number {
     return this.#count;
+  }
+
+  /**
+   * 是否已「原地打转」：最近连续 `limit` 次调用的指纹完全相同。
+   *
+   * 判据是**连续**而非累计：同一份日志里分两次读同一段（中间查了别的东西）
+   * 是正常行为，只有连续重复才是空转。
+   */
+  isSpinning(limit = ToolCallTracker.REPEAT_LIMIT): boolean {
+    if (this.#signatures.length < limit) return false;
+    const tail = this.#signatures.slice(-limit);
+    return tail.every((s) => s === tail[0]);
+  }
+
+  /** 最近一次调用的指纹（诊断用，如 `grep_log_file:{"pattern":"ERROR"}`） */
+  get lastSignature(): string {
+    return this.#signatures[this.#signatures.length - 1] ?? '';
+  }
+
+  /** 工具名 + 规范化参数的指纹：参数键序不同但语义相同的调用应视为同一调用 */
+  static signatureOf(name: string, args: unknown): string {
+    return `${name}:${stableStringify(args)}`;
   }
 
   /** 待配对（结果尚未到达）的调用数量 */
@@ -268,6 +322,7 @@ export class ToolCallTracker {
     entry.announced = true;
     entry.args = args;
     this.#count++;
+    this.#signatures.push(ToolCallTracker.signatureOf(entry.name, args));
     return { name: entry.name, args };
   }
 }

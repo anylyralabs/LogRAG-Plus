@@ -19,6 +19,8 @@ import { statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import { rag as cfg } from '../config.ts';
+import { rerank } from './embed.ts';
+import { readEmbeddingMeta, semanticSearch, type SemanticHit } from './semantic.ts';
 
 export interface RagHit {
   title: string;
@@ -39,6 +41,14 @@ export interface RagSearchResult {
   text: string;
   /** 语义通道是否可用（false = 降级为纯词法，需显式告知） */
   semanticAvailable: boolean;
+  /** 实际走了哪条通道：融合 / 仅词法 */
+  mode?: 'hybrid' | 'lexical';
+  /** 语义通道降级原因（有值即说明本该融合但没融成） */
+  semanticError?: string;
+  /** 是否经过重排序 */
+  reranked?: boolean;
+  /** 重排降级原因 */
+  rerankError?: string;
   error?: string;
 }
 
@@ -267,13 +277,69 @@ export interface SearchParams {
   topic?: string | null;
 }
 
+/** 送去重排的候选数量上限（再多就是白花钱，且头部的排名已稳定） */
+const RERANK_POOL = 20;
+
+const RRF_K = 60;
+
+/**
+ * 词法 + 向量融合（RRF）。
+ *
+ * 为什么不用加权求和：BM25 是负值且量纲不定、余弦是 0–1，两者相加需要归一化，
+ * 而归一化系数随查询变化——同一个系数在长查询上会偏向词法、短查询上偏向向量。
+ * RRF 只看名次，天然免疫量纲问题。
+ */
+function mergeByRowid(conn: DatabaseSync, lexical: RagHit[], semantic: SemanticHit[]): RagHit[] {
+  const score = new Map<number, number>();
+  const byRowid = new Map<number, { title: string; body: string; source: string; snippet: string }>();
+
+  lexical.forEach((hit, i) => {
+    const rowid = rowidOf(conn, hit.source, hit.title);
+    if (rowid === null) return;
+    byRowid.set(rowid, { title: hit.title, body: hit.body, source: hit.source, snippet: hit.snippet });
+    score.set(rowid, (score.get(rowid) ?? 0) + 1 / (RRF_K + i + 1));
+  });
+
+  semantic.forEach((hit, i) => {
+    const existing = score.get(hit.rowid) ?? 0;
+    score.set(hit.rowid, existing + 1 / (RRF_K + i + 1));
+  });
+
+  // 只有向量命中的条目需要回表取正文
+  for (const hit of semantic) {
+    if (byRowid.has(hit.rowid)) continue;
+    const row = conn
+      .prepare('SELECT title, body, source FROM docs WHERE rowid = ?')
+      .get(hit.rowid) as { title: string; body: string; source: string } | undefined;
+    if (row === undefined) continue;
+    byRowid.set(hit.rowid, { ...row, snippet: row.body.slice(0, 400) });
+  }
+
+  const out: RagHit[] = [];
+  for (const [rowid, fused] of score) {
+    const info = byRowid.get(rowid);
+    if (info === undefined) continue;
+    out.push({ ...info, score: -fused });
+  }
+  out.sort((a, b) => a.score - b.score);
+  return out;
+}
+
+/** 由 source + title 反查 rowid（词法结果里 query 未带 rowid） */
+function rowidOf(conn: DatabaseSync, source: string, title: string): number | null {
+  const row = conn
+    .prepare('SELECT rowid FROM docs WHERE source = ? AND title = ? LIMIT 1')
+    .get(source, title) as { rowid: number } | undefined;
+  return row?.rowid ?? null;
+}
+
 /**
  * 检索知识库。
  *
  * `k` 语义为「不同来源文件数」——若同源配额后不足 k，会用同源 chunk 补足
  * （保证结果数量，但优先展示多样性）。
  */
-export function search(params: SearchParams): RagSearchResult {
+export async function search(params: SearchParams): Promise<RagSearchResult> {
   const query = params.query.trim();
   if (query === '') {
     return {
@@ -302,7 +368,43 @@ export function search(params: SearchParams): RagSearchResult {
 
   // 召回池：扩大后再做同源配额，避免配额后数量不足
   const pool = Math.max(k * 6, 30);
-  const raw = lexicalSearch(query, pool, topic);
+  const conn = getDb()!;
+  const lexical = lexicalSearch(query, pool, topic);
+
+  // 语义召回（可选）。失败时仍返回词法结果，但把原因带出去——
+  // 静默降级正是实测缺陷 2（paraphrase 命中率 93%→7% 而界面无异常）。
+  let semanticError: string | undefined;
+  let merged = lexical;
+  if (cfg.embedding.enabled) {
+    const meta = readEmbeddingMeta(conn);
+    if (meta === null) {
+      semanticError = '索引未包含向量（需重建索引）';
+    } else if (meta.model !== cfg.embedding.model) {
+      semanticError = `索引向量由 ${meta.model} 生成，当前配置为 ${cfg.embedding.model}，请重建索引`;
+    } else {
+      const sem = await semanticSearch(conn, query, pool, cfg.embedding.model);
+      if (sem.ok) merged = mergeByRowid(conn, lexical, sem.hits);
+      else semanticError = sem.error;
+    }
+  }
+
+  // 重排：只重排召回池的前若干条，失败即保留原序
+  let reranked = false;
+  let rerankError: string | undefined;
+  if (cfg.rerank.enabled && merged.length > 1) {
+    const head = merged.slice(0, Math.min(merged.length, RERANK_POOL));
+    const rr = await rerank(query, head.map((h) => `${h.title}\n${h.body}`.slice(0, 1200)));
+    if (rr.ok) {
+      const ordered = rr.hits.map((x) => head[x.index]).filter((h): h is RagHit => h !== undefined);
+      const rest = merged.slice(head.length);
+      merged = [...ordered, ...rest];
+      reranked = true;
+    } else {
+      rerankError = rr.error;
+    }
+  }
+
+  const raw = merged;
 
   if (raw.length === 0) {
     const scope = topic !== null ? `（目录范围：${topic}）` : '';
@@ -319,7 +421,11 @@ export function search(params: SearchParams): RagSearchResult {
           : '2. 尝试该异常链中 Caused by 后的类名（往往才是文档记录的）；',
         '3. 若确实未覆盖，改用 GitHub 或网络检索。',
       ].join('\n'),
-      semanticAvailable: cfg.embedding.enabled,
+      semanticAvailable: semanticError === undefined && cfg.embedding.enabled,
+      mode: semanticError === undefined && cfg.embedding.enabled ? 'hybrid' : 'lexical',
+      reranked,
+      ...(semanticError !== undefined ? { semanticError } : {}),
+      ...(rerankError !== undefined ? { rerankError } : {}),
     };
   }
 
@@ -354,11 +460,17 @@ export function search(params: SearchParams): RagSearchResult {
     lines.push('');
   });
 
-  // embedding 不可用时显式告知（修复实测缺陷 2：静默降级）
+  // 降级必须写进结果（修复实测缺陷 2：静默降级）
+  if (semanticError !== undefined) {
+    lines.push(`ℹ️ 语义检索已降级为纯词法：${semanticError}`);
+  }
   if (!cfg.embedding.enabled) {
     lines.push(
-      'ℹ️ 语义检索当前不可用，以上为纯词法检索结果。若结果不相关，请改用日志中出现的**精确词面**（异常类名原文、错误码）。',
+      'ℹ️ 语义检索未启用，以上为纯词法检索结果。若结果不相关，请改用日志中出现的**精确词面**（异常类名原文、错误码）。',
     );
+  }
+  if (rerankError !== undefined) {
+    lines.push(`ℹ️ 重排序已跳过：${rerankError}`);
   }
 
   return {
@@ -366,7 +478,11 @@ export function search(params: SearchParams): RagSearchResult {
     hits: selected,
     distinctSources,
     text: lines.join('\n'),
-    semanticAvailable: cfg.embedding.enabled,
+    semanticAvailable: semanticError === undefined && cfg.embedding.enabled,
+    mode: semanticError === undefined && cfg.embedding.enabled ? 'hybrid' : 'lexical',
+    reranked,
+    ...(semanticError !== undefined ? { semanticError } : {}),
+    ...(rerankError !== undefined ? { rerankError } : {}),
   };
 }
 

@@ -55,7 +55,7 @@ function fragments(json: string): string[] {
   return out;
 }
 
-async function startFakeModel(steps: Step[]): Promise<FakeModel> {
+async function startFakeModel(steps: Step[], synthesisText?: string): Promise<FakeModel> {
   const requests: string[] = [];
   let cursor = 0;
 
@@ -63,10 +63,18 @@ async function startFakeModel(steps: Step[]): Promise<FakeModel> {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
-      requests.push(Buffer.concat(chunks).toString('utf8'));
+      const raw = Buffer.concat(chunks).toString('utf8');
+      requests.push(raw);
+
+      // 收尾轮（runSynthesis）不进 agent 图，请求体里没有 tools。
+      // 假端点必须据此区分，否则会把「要一段文字」误当成「要调工具」——
+      // 这与真实端点的行为不符（真实端点只是没有工具可选，模型照常吐文字）。
+      const isSynthesis = synthesisText !== undefined && !raw.includes('"tools"');
 
       // 脚本用尽后重复最后一步，避免测试因请求次数估算偏差而挂起
-      const step = steps[Math.min(cursor, steps.length - 1)]!;
+      const step: Step = isSynthesis
+        ? { kind: 'content', text: synthesisText }
+        : steps[Math.min(cursor, steps.length - 1)]!;
       cursor += 1;
       const requestNo = cursor;
 
@@ -185,8 +193,12 @@ interface RunOutcome {
   requests: string[];
 }
 
-async function runWithSteps(steps: Step[], maxRounds: number): Promise<RunOutcome> {
-  const model = await startFakeModel(steps);
+async function runWithSteps(
+  steps: Step[],
+  maxRounds: number,
+  synthesisText?: string,
+): Promise<RunOutcome> {
+  const model = await startFakeModel(steps, synthesisText);
   const { frames, sse } = makeSse();
   try {
     const res = await runAgent({
@@ -351,4 +363,93 @@ test('未撞顶时不做收尾轮（省一次调用、不改变交付内容）',
   assert.equal(res.hitLimit, false);
   assert.equal(requests.length, 1, '不该凭空多一次模型调用');
   assert.equal(res.rounds, 0);
+});
+
+// ── 生产语料驱动的两类失败（见 docs/measurements.md 第 13 节） ──
+
+test('原地打转：连续同工具同参数即中止并转收尾轮（回归：生产 255 条轮次失控）', async () => {
+  const answer = '日志显示 spatial_gui 缺少强制依赖 cloth_config，请安装后再启动。';
+  // 同一个调用重复 5 次；检测在第 3 次应触发
+  const same = { kind: 'tool' as const, name: 'grep_log_file', args: { query: 'ERROR', context_lines: 1 } };
+  const { res, requests } = await runWithSteps(
+    [same, same, same, same, same],
+    30,
+    answer,
+  );
+
+  // 关键：不能因为打转而失败；必须给出结论
+  assert.equal(res.ok, true, `应转收尾轮产出结论，实际：${res.error ?? ''}`);
+  assert.equal(res.content, answer);
+  assert.equal(res.spinDetected, true, '应标记出「打转中止」以便区分轮次耗尽');
+  assert.ok(res.rounds <= 3, `应在第 3 次重复时停下，实际跑了 ${res.rounds} 轮`);
+
+  // 收尾轮的提示词要明确「停止重复检索」而不是「多查一点」
+  const last = requests[requests.length - 1] ?? '';
+  assert.ok(last.includes('重复同一次工具调用'), '收尾轮必须告知模型是打转而非预算耗尽');
+  assert.ok(!last.includes('已用完'), '不能把打转说成轮次耗尽');
+});
+
+test('打转检测不误伤「换参数重试」（同名工具、不同查询）', async () => {
+  const answer = '根因是依赖缺失。';
+  const { res } = await runWithSteps(
+    [
+      { kind: 'tool', name: 'grep_log_file', args: { query: 'ERROR' } },
+      { kind: 'tool', name: 'grep_log_file', args: { query: 'Missing' } },
+      { kind: 'tool', name: 'grep_log_file', args: { query: 'cloth_config' } },
+      { kind: 'tool', name: 'read_log_file', args: { from: 1, to: 5 } },
+      { kind: 'content', text: answer },
+    ],
+    30,
+  );
+  assert.equal(res.ok, true);
+  assert.notEqual(res.spinDetected, true, '参数不同不应判为打转');
+  assert.equal(res.rounds, 4);
+});
+
+test('参数键序不同也算同一调用（否则打转检测形同虚设）', async () => {
+  const answer = '结论。';
+  const { res } = await runWithSteps(
+    [
+      { kind: 'tool', name: 'grep_log_file', args: { query: 'ERROR', context_lines: 1 } },
+      { kind: 'tool', name: 'grep_log_file', args: { context_lines: 1, query: 'ERROR' } },
+      { kind: 'tool', name: 'grep_log_file', args: { query: 'ERROR', context_lines: 1 } },
+    ],
+    30,
+    answer,
+  );
+  assert.equal(res.spinDetected, true, '键序不同但语义相同，应判为打转');
+});
+
+test('工具调用被写成正文：视为本轮流产并重出结论（回归：生产 29 条）', async () => {
+  const answer = '日志里没有致命错误，建议检查 Java 版本。';
+  const { res, frames } = await runWithSteps(
+    // 模型把调用说成了正文，而不是真的调用
+    [{ kind: 'content', text: '<tool_call> <function=list_log_files/>' }],
+    10,
+    answer,
+  );
+
+  assert.equal(res.ok, true, '应经收尾轮产出真实结论，而不是交付一段假调用');
+  assert.equal(res.content, answer, '最终正文必须是真结论，不能残留 <tool_call>');
+  assert.ok(!res.content.includes('<tool_call>'), '假调用必须被清掉');
+
+  // 必须让用户看到「刚才那段不算」，否则会以为是模型在说话
+  const notice = frames.find((f) => f.kind === 'status' && f.data.includes('写成了正文'));
+  assert.ok(notice !== undefined, '应发出「把工具调用写成正文」的状态帧');
+});
+
+test('假调用与真实结论混在一起时，保留结论、去掉假调用', async () => {
+  const { res } = await runWithSteps(
+    [
+      {
+        kind: 'content',
+        text: '<tool_call> <function=grep_log_file/></tool_call>\n\n真正的问题是 cloth_config 版本过低。',
+      },
+    ],
+    10,
+    '真正的问题是 cloth_config 版本过低。',
+  );
+  assert.equal(res.ok, true);
+  assert.ok(res.content.includes('cloth_config'));
+  assert.ok(!res.content.includes('<tool_call>'));
 });

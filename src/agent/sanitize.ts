@@ -138,8 +138,14 @@ const INTERNAL_MARKERS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
   // 通用 [system: ...] 注入消息（保守：仅匹配 system 前缀，不误伤正常文本）
   { name: 'system-tag', pattern: /\[system:\s*[^\]\n]{0,120}\]/gi },
 
-  // 框架的工具调用回显
-  { name: 'tool-call-echo', pattern: /\[?(?:ToolMessage|AIMessageChunk|HumanMessage)\]?/g },
+  // 框架的工具调用回显。
+  //
+  // ⚠️ 这里曾经写成裸的 `/[ToolMessage|AIMessageChunk|HumanMessage]/`，会把
+  // **正文里任何提到这些类名的地方一并删掉**——包括我们自己的排障说明
+  // （「`AIMessageChunk.tool_calls` 与 `tool_call_chunks` 的区别」这类内容
+  // 正是知识库与报告里要写的东西）。现在只匹配**方括号包裹**的形态，
+  // 那是框架真正的回显格式；裸类名保留。
+  { name: 'tool-call-echo', pattern: /\[(?:ToolMessage|AIMessageChunk|HumanMessage)\]/g },
 ];
 
 export interface SanitizeResult {
@@ -147,6 +153,70 @@ export interface SanitizeResult {
   text: string;
   /** 移除了哪些标记（供日志与监控） */
   removed: string[];
+}
+
+/**
+ * 「把工具调用写成了正文」的检测。
+ *
+ * ## 依据（生产语料，不是假想）
+ *
+ * 9353 条分析记录里，**29 条**的 `overall` 落在 56–77，共同特征是答案正文是空的，
+ * 或者正文里直接躺着一句工具调用：
+ *
+ * ```
+ * <tool_call> <function=list_log_files/>
+ * ```
+ *
+ * 它们全部是 1–2 轮就结束的短会话——模型把「我要调工具」这句话**说出来了**，
+ * 而不是真的去调。用户看到的是一段像是代码的乱码，或者一片空白。
+ *
+ * `prompts/output-spec.md` 第 4 条已经明确禁止这种写法，但**禁令不能当检测用**：
+ * 29 次里一次都没被拦住。提示词是概率性的，输出侧必须是确定性的。
+ *
+ * ## 与 INTERNAL_MARKERS 的区别
+ *
+ * 上面那张表是「框架泄漏」（我们自己的噪音）；这里检测的是「模型把动作当文本」，
+ * 是模型的错误。两者都要消掉，但**记录方式不同**：后者说明模型没学会用工具通道，
+ * 属于需要告警的模式，不应静默吞掉。
+ */
+const TOOL_CALL_AS_TEXT: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+  // 完整的假工具调用块（最常见形态）
+  { name: 'tool-call-tag', pattern: /<tool_call>[\s\S]{0,400}?<\/tool_call>/gi },
+  // 只写了函数标签、没有闭合（实测形态）
+  { name: 'tool-call-function', pattern: /<function\s*=\s*[^>\n]{1,80}\s*\/?>/gi },
+  // 未闭合的 <tool_call>（流被截断时常见）
+  { name: 'tool-call-open', pattern: /<tool_call>[\s\S]{0,200}$/i },
+  // 某些模型用 JSON 形态叙述调用
+  {
+    name: 'tool-call-json',
+    pattern: /^\s*\{\s*"name"\s*:\s*"[a-z_]{3,40}"\s*,\s*"parameters"\s*:\s*\{[\s\S]{0,400}?\}\s*\}\s*$/gim,
+  },
+];
+
+/**
+ * 检测并移除「被写成正文的工具调用」。
+ *
+ * @returns `detected` 为 true 表示模型确实把调用写进了正文（供上层告警/降分）
+ */
+export function stripToolCallText(text: string): { text: string; detected: boolean; kinds: string[] } {
+  if (text === '') return { text: '', detected: false, kinds: [] };
+
+  let out = text;
+  const kinds: string[] = [];
+  for (const { name, pattern } of TOOL_CALL_AS_TEXT) {
+    pattern.lastIndex = 0;
+    if (pattern.test(out)) {
+      kinds.push(name);
+      pattern.lastIndex = 0;
+      out = out.replace(pattern, '');
+    }
+  }
+
+  if (kinds.length === 0) return { text: out, detected: false, kinds: [] };
+
+  // 移除后常见结果是一整段空白（那 29 条里有相当一部分答案原本就只有这一段）
+  const trimmed = out.replace(/\n{3,}/g, '\n\n').trim();
+  return { text: trimmed, detected: true, kinds };
 }
 
 /**

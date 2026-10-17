@@ -242,6 +242,22 @@ export const rag = {
       return this.baseUrl !== '' && this.model !== '';
     },
   },
+  /**
+   * 重排序 provider（可选）。
+   *
+   * 与 embedding 分开配置：两者常常不是同一个服务（这里 embedding 用 bge-m3、
+   * 重排序用 bge-reranker-v2-m3，虽然同属 SiliconFlow，但换成自建
+   * vLLM / Xinference 时往往只部署其中一个）。留空则显式跳过重排，
+   * 检索结果附带「未重排」的说明，而不是假装排过。
+   */
+  rerank: {
+    baseUrl: env('RAG_RERANK_BASE_URL', ''),
+    apiKey: env('RAG_RERANK_API_KEY', ''),
+    model: env('RAG_RERANK_MODEL', ''),
+    get enabled(): boolean {
+      return this.baseUrl !== '' && this.model !== '';
+    },
+  },
 };
 
 /**

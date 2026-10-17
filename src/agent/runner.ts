@@ -26,7 +26,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { buildSystemPrompt, type PromptContext } from './prompt.ts';
 import { createModel, type ProviderConfig } from './model.ts';
 import { buildTools, type ToolContext } from './tools/index.ts';
-import { StreamingSanitizer } from './sanitize.ts';
+import { StreamingSanitizer, stripToolCallText } from './sanitize.ts';
 import {
   ToolCallTracker,
   type Announcement,
@@ -85,8 +85,18 @@ export interface RunResult {
   toolCalls: Array<{ round: number; name: string; args: unknown; result: string; ok: boolean }>;
   /** 实际轮次 */
   rounds: number;
-  /** 是否触及轮次上限 */
+  /** 是否触及轮次上限（含「原地打转」提前中止） */
   hitLimit: boolean;
+  /**
+   * 是否因“原地打转”而提前中止（连续同一调用）。
+   *
+   * 与 `hitLimit` 共用收尾路径，但两者对模型的含义不同：
+   * 轮次耗尽 = 预算用完，收尾轮要说“用已有材料总结”；
+   * 打转 = 方法失效，收尾轮要说“停止重复检索，直接给出判断”。
+   */
+  spinDetected?: boolean;
+  /** 是否检测到「工具调用被写成正文」（生产语料 29 条命中此形态） */
+  toolCallAsText?: boolean;
   /**
    * 质量自评（见 `src/eval/scorer.ts`）。
    *
@@ -139,6 +149,9 @@ function mergeRuns(first: RunResult, final: RunResult): RunResult {
     toolCalls: [...first.toolCalls, ...final.toolCalls],
     rounds: first.rounds + final.rounds,
     hitLimit: true,
+    // 中止原因来自主循环，不能在合并时丢掉——收尾轮本身既不打转也不带假调用
+    spinDetected: first.spinDetected ?? false,
+    toolCallAsText: first.toolCallAsText ?? false,
   };
 }
 
@@ -169,7 +182,10 @@ async function runSynthesis(options: RunOptions, prev: RunResult): Promise<RunRe
 
   sse.status({
     type: 'reflection',
-    message: `工具调用已达 ${prev.rounds} 次上限，正在基于已获取的信息给出最终结论…`,
+    message:
+      prev.spinDetected === true
+        ? '检测到重复检索，已中止工具通道，正在整理现有证据给出结论…'
+        : `工具调用已达 ${prev.rounds} 次上限，正在基于已获取的信息给出最终结论…`,
   });
 
   const model = createModel(provider);
@@ -245,13 +261,30 @@ const SYNTHESIS_ITEM_MAX = 6_000;
 function buildSynthesisMessage(options: RunOptions, prev: RunResult): string {
   const parts: string[] = [options.userMessage, '', '---', ''];
 
-  parts.push(
-    `【系统提示】本次分析已用完 ${prev.rounds} 次工具调用上限，工具通道已关闭，` +
-      '无法再检索或读取任何内容。请**立即**基于下方已获取的信息给出最终结论：',
-  );
-  parts.push('');
-  parts.push('- 不要再请求任何工具，本次调用不会执行它们。');
-  parts.push('- 证据不足的地方如实说明「现有信息无法判定」，不要编造。');
+  // 「预算用完」与「方法失效」要给模型不同的指令：前者的病是没查够，后者是白查了。
+  // 生产语料里 255 条轮次 ≥10 的低分记录（典型 `fw79h8D`：97 轮 / 96 次调用仍停在 78 分）
+  // 都属于后者——它们在**重复同一个已经失败过的动作**，再给「多查一点」的余地只会继续空转。
+  if (prev.spinDetected === true) {
+    parts.push(
+      `【系统提示】检测到你在重复同一次工具调用（同一工具、同一参数连续多次），` +
+        '因此**提前中止**了工具通道。这不是轮次耗尽，而是这条路已经走不通。',
+    );
+    parts.push('');
+    parts.push('- 停止一切重复检索。**不要再试图用同一个关键词再查一遍。**');
+    parts.push('- 直接基于下方已获取的信息给出结论；若确实证据不足，就明确说「现有信息无法判定根因」，');
+    parts.push('  并给出**用户可以自己做的下一步检查**（哪一个文件、哪一行、看什么）。');
+    parts.push('- 特别注意：如果前面的检索都返回「无匹配」，那本身就是一个结论——说明该关键词不在日志里，');
+    parts.push('  应换判据（换行号区间、换文件名、换报错原文），而不是重复同一个查询。');
+  } else {
+    parts.push(
+      `【系统提示】本次分析已用完 ${prev.rounds} 次工具调用上限，工具通道已关闭，` +
+        '无法再检索或读取任何内容。请**立即**基于下方已获取的信息给出最终结论：',
+    );
+    parts.push('');
+    parts.push('- 不要再请求任何工具，本次调用不会执行它们。');
+    parts.push('- 证据不足的地方如实说明「现有信息无法判定」，不要编造。');
+  }
+
   parts.push('- 按输出规范给出结论与可操作步骤。');
   parts.push('');
   parts.push(`已获取的信息（共 ${prev.toolCalls.length} 次调用）：`);
@@ -367,6 +400,10 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
   let reasoning = '';
   const toolCalls: RunResult['toolCalls'] = [];
   let hitLimit = false;
+  /** 是否因「原地打转」而非轮次耗尽而中止（两者共用收尾路径，但日志要分得清） */
+  let spinDetected = false;
+  /** 模型是否把工具调用写成了正文（生产语料 29 条，见 sanitize.ts） */
+  let toolCallAsText = false;
 
   /**
    * 工具调用跟踪器（见 `tool-tracker.ts`）。
@@ -483,6 +520,22 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
       );
       for (const a of announced) emitTool(a);
 
+      // 原地打转检测（依据：生产语料 255 条低分记录是「轮次 ≥10 且效率分 0」，
+      // 典型如 `fw79h8D` 97 轮 / 96 次工具调用仍停在 78 分）。
+      //
+      // 为什么必须在**宣告之后、结果回来之前**判断：此时我们才知道这一轮要调用
+      // 什么；等到结果回来再判断，又一次空转已经发生了。
+      //
+      // 处理方式与撞轮次上限**同一条路径**（`hitLimit` → 收尾轮），因为它本质是
+      // 「这条路走不通了，用已有材料给出结论」——而不是失败。若走失败分支，
+      // 用户会因为模型绕圈而拿不到任何答案，这比 78 分更糟。
+      if (tracker.isSpinning()) {
+        hitLimit = true;
+        spinDetected = true;
+        sse.limit(maxRounds);
+        break;
+      }
+
       // 轮次上限
       if (tracker.count > maxRounds) {
         hitLimit = true;
@@ -497,6 +550,24 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
     const reasoningTail = reasoningSanitizer.flush();
     if (reasoningTail !== '') sse.thinking(reasoningTail);
 
+    // 工具调用被写成正文（生产语料 29 条，见 `sanitize.ts` 的 `stripToolCallText`）。
+    //
+    // 关键在于**不能只把它删掉就算成功**：那 29 条里有相当一部分答案原本就只有
+    // 这一段假调用，删完剩一片空白——用户看到的是「成功但什么都没有」。
+    // 因此这里把「检测到假调用」当作**本轮流产**处理，交给收尾轮重新产出。
+    // 若收尾轮也失败，上层会如实报失败（空正文一律失败，这条铁律不变）。
+    const stripped = stripToolCallText(content);
+    if (stripped.detected) {
+      content = stripped.text;
+      toolCallAsText = true;
+      // 把正文里那段假调用**从流里收回**：已经发出去的增量无法撤回，
+      // 但至少让它别再累积到「已交付内容」里，前端按 `done` 帧的最终正文渲染。
+      sse.status({
+        type: 'reflection',
+        message: '模型把工具调用写成了正文（未真正执行），正在重新整理结论…',
+      });
+    }
+
     // 关键校验：流是否正常结束且有正文
     // （实测教训：上游流可能中途截断，只留思维链而无正文，被当作成功）
     //
@@ -504,16 +575,43 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
     // 当成功返回（`&& !hitLimit`），于是端到端跑出「30 轮工具检索、0 字答案、
     // 自评 23 分、却报 completed」的结果。收尾轮由 `runAgent` 负责补上，
     // 这里只负责如实反映「这一轮没产出」。
-    if (content.trim() === '') {
-      const msg = hitLimit
+    // 把工具调用写成正文 = 本轮流产，与「撞顶」同样交给收尾轮重做一次
+    // （只清掉假调用就交付，会让用户拿到一段空白——那 29 条生产记录正是如此）
+    if (toolCallAsText) hitLimit = true;
+
+    if (content.trim() === '' || toolCallAsText) {
+      const msg = toolCallAsText
+        ? '模型把工具调用写成了正文（未真正执行），本轮无有效结论。'
+        : spinDetected
+        ? '模型在重复同一次检索，已中止并转入结论整理。'
+        : hitLimit
         ? '已达到工具调用上限但没有产出结论。'
         : reasoning !== ''
           ? '上游流异常截断：已产生思维链但正文为空。请重试。'
           : '模型未返回任何内容。请重试或更换模型。';
-      return { ok: false, content, reasoning, toolCalls, rounds: tracker.count, hitLimit, error: msg };
+      return {
+        ok: false,
+        content,
+        reasoning,
+        toolCalls,
+        rounds: tracker.count,
+        hitLimit,
+        spinDetected,
+        toolCallAsText,
+        error: msg,
+      };
     }
 
-    return { ok: true, content, reasoning, toolCalls, rounds: tracker.count, hitLimit };
+    return {
+      ok: true,
+      content,
+      reasoning,
+      toolCalls,
+      rounds: tracker.count,
+      hitLimit,
+      spinDetected,
+      toolCallAsText,
+    };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, content, reasoning, toolCalls, rounds: tracker.count, hitLimit, error: msg };

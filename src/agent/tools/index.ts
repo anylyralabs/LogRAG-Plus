@@ -142,7 +142,7 @@ export function buildTools(ctx: ToolContext) {
     tool(
       async ({ query, topic, k }) => {
         ctx.counters.rag++;
-        const r = ragSearch({ query, k: k ?? 5, topic: topic ?? null });
+        const r = await ragSearch({ query, k: k ?? 5, topic: topic ?? null });
         const notice = budgetNotice('知识库检索', ctx.counters.rag, BUDGET.rag);
         return r.text + (notice ?? '');
       },

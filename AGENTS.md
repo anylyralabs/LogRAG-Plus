@@ -434,7 +434,7 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（后端 27 个文件 323 项 + 前端 web/tests 15 项）
+npm test                    # 全部单元测试（后端 29 个文件 336 项 + 前端 web/tests 15 项）
 npm run test:web            # 只跑前端测试（SSE 增量解析）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
@@ -462,6 +462,16 @@ cd web && npm run typecheck && npm run build
 **知识库改动后必须重建索引**，否则新条目检索不到（`rag_search` 返回「索引不可用」
 或命中旧分块）。重建前先确认没有子代理在写 `knowledge/`
 （`find knowledge -newermt '-30 minutes'`），避免读到写了一半的文件。
+
+## 与用户的协作约定（不可省略）
+
+- **工程脚本与文档一律保留，不得删除。** `scripts/`、`docs/`、`MISSION.md`、
+  `HANDOFF.md`、`data/corpus/` 里的实测数据，以及历史排查脚本，都是
+  「某个结论是怎么来的」证据链。后续优化要回头复算（例如「这条签名到底多少份
+  日志命中」），删掉就等于把结论降级成传闻。清理前必须确认没有任何文档引用它。
+- 使用简体中文与用户交流与推理；术语可保留英文，但表述须以中文为准。
+- **不要替用户猜测成本与取舍**：改提示词、改阈值、改默认值这类「影响输出质量」的
+  改动，先量化收益再动手，量化不了就先说不确定。
 
 ## 实测数据摘要（27 份真实移动端日志）
 

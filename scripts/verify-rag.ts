@@ -5,7 +5,7 @@
  */
 import { applySourceQuota, listTopics, search, stats } from '../src/rag/search.ts';
 
-function main(): void {
+async function main(): Promise<void> {
   console.log('═══ RAG 检索验证（复用 LogShare 现有索引）═══\n');
 
   const s = stats();
@@ -16,7 +16,7 @@ function main(): void {
   console.log('修复前: 重叠率 38%，每次仅 1.20 个不同来源\n');
 
   for (const q of ['Mixin', 'OutOfMemoryError', 'Java version']) {
-    const r = search({ query: q, k: 5 });
+    const r = await search({ query: q, k: 5 });
     console.log(`  rag_search("${q}") → ${r.hits.length} 条，来自 ${r.distinctSources} 个不同文件`);
     for (const h of r.hits) {
       console.log(`      · ${h.source}`);
@@ -29,7 +29,7 @@ function main(): void {
   const variants = ['Mixin', 'mixin 注入', 'MixinTransformerError', 'MixinApplyError'];
   const allSources: string[] = [];
   for (const q of variants) {
-    const r = search({ query: q, k: 5 });
+    const r = await search({ query: q, k: 5 });
     allSources.push(...r.hits.map((h) => `${h.source}#${h.title}`));
     console.log(`  "${q}" → ${r.distinctSources} 个来源`);
   }
@@ -40,7 +40,7 @@ function main(): void {
 
   // ── 缺陷 2：embedding 降级显式化 ──
   console.log('【缺陷 2】embedding 降级应显式告知（实测：paraphrase 93.3%→7% 且无告警）');
-  const r = search({ query: '内存不足', k: 3 });
+  const r = await search({ query: '内存不足', k: 3 });
   console.log(`  semanticAvailable = ${r.semanticAvailable}`);
   const hasNotice = r.text.includes('语义检索当前不可用');
   console.log(`  结果中含降级提示: ${hasNotice ? '是 ✓' : '否'}\n`);
@@ -48,7 +48,7 @@ function main(): void {
   // ── 中文检索（LIKE 兜底） ──
   console.log('【中文检索】FTS5 不处理中文，需 LIKE 兜底');
   for (const q of ['内存不足', '启动闪退', '渲染器崩溃']) {
-    const rr = search({ query: q, k: 3 });
+    const rr = await search({ query: q, k: 3 });
     console.log(`  "${q}" → ${rr.hits.length} 条，${rr.distinctSources} 个来源`);
   }
   console.log('');
@@ -69,4 +69,4 @@ function main(): void {
   console.log(`  quota=2 → ${applySourceQuota(fake, 2).map((h) => h.title).join(', ')}`);
 }
 
-main();
+void main();

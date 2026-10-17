@@ -15,6 +15,9 @@ import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import { rag as ragCfg } from '../config.ts';
+import { embedTexts } from './embed.ts';
+
 import { type Chunk, chunkMarkdown, computeStats } from './chunker.ts';
 import { readKnowledgeFiles } from './loader.ts';
 
@@ -29,6 +32,12 @@ export interface BuildResult {
   singleChunkFiles: string[];
   avgChars: number;
   dbPath: string;
+  /** 实际写入向量的分块数（0 = 未启用或失败降级） */
+  embedded: number;
+  /** 向量模型名（记进库，查询侧据此校验维度一致性） */
+  embeddingModel: string;
+  /** 向量化失败原因（非致命：索引仍可用，只是纯词法） */
+  embeddingError?: string;
   error?: string;
 }
 
@@ -49,10 +58,14 @@ function ensureSchema(db: DatabaseSync): void {
     source_mtime INTEGER
   )`);
 
-  // 语义向量（可选，未启用 embedding 时为空）
+  // 语义向量（可选）+ 元信息（模型名/维度，避免换模型后拿旧向量硬算）
   db.exec(`CREATE TABLE IF NOT EXISTS doc_embeddings(
     rowid INTEGER PRIMARY KEY,
     vec BLOB NOT NULL
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS embedding_meta(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   )`);
 }
 
@@ -62,7 +75,7 @@ function ensureSchema(db: DatabaseSync): void {
  * @param knowledgeDir 知识库根目录
  * @param dbPath 目标索引路径
  */
-export function buildIndex(knowledgeDir: string, dbPath: string): BuildResult {
+export async function buildIndex(knowledgeDir: string, dbPath: string): Promise<BuildResult> {
   const files = readKnowledgeFiles(knowledgeDir);
 
   if (files.length === 0) {
@@ -73,6 +86,8 @@ export function buildIndex(knowledgeDir: string, dbPath: string): BuildResult {
       singleChunkFiles: [],
       avgChars: 0,
       dbPath,
+      embedded: 0,
+      embeddingModel: '',
       error: `知识库目录为空或不存在: ${knowledgeDir}`,
     };
   }
@@ -110,6 +125,36 @@ export function buildIndex(knowledgeDir: string, dbPath: string): BuildResult {
     }
     db.exec('COMMIT');
 
+    // 语义向量：失败不阻塞构建（索引仍可用，只是纯词法）
+    let embedded = 0;
+    let embeddingError: string | undefined;
+    const embeddingModel = ragCfg.embedding.model;
+    if (ragCfg.embedding.enabled) {
+      const vectors = await embedTexts(all.map((c) => `${c.title}\n${c.body}`));
+      if (vectors.ok) {
+        const insertVec = db.prepare('INSERT INTO doc_embeddings(rowid, vec) VALUES (?, ?)');
+        const rowIds = (db.prepare('SELECT rowid FROM docs ORDER BY rowid').all() as Array<{ rowid: number }>)
+          .map((r) => r.rowid);
+        db.exec('BEGIN');
+        for (let i = 0; i < rowIds.length && i < vectors.vectors.length; i++) {
+          const vec = vectors.vectors[i]!;
+          insertVec.run(rowIds[i]!, new Uint8Array(new Float32Array(vec).buffer));
+          embedded++;
+        }
+        const meta = [
+          ['model', embeddingModel],
+          ['dim', String(vectors.vectors[0]?.length ?? 0)],
+          ['count', String(embedded)],
+        ];
+        for (const [k, v] of meta) {
+          db.prepare('INSERT OR REPLACE INTO embedding_meta(key, value) VALUES (?, ?)').run(k!, v!);
+        }
+        db.exec('COMMIT');
+      } else {
+        embeddingError = vectors.error;
+      }
+    }
+
     // 优化 FTS5 索引（合并段，加速查询）
     db.exec("INSERT INTO docs(docs) VALUES('optimize')");
 
@@ -126,6 +171,9 @@ export function buildIndex(knowledgeDir: string, dbPath: string): BuildResult {
       singleChunkFiles: stats.singleChunkFiles,
       avgChars: stats.avgChars,
       dbPath,
+      embedded,
+      embeddingModel: embedded > 0 ? embeddingModel : '',
+      ...(embeddingError !== undefined ? { embeddingError } : {}),
     };
   } catch (e) {
     try {
@@ -141,6 +189,8 @@ export function buildIndex(knowledgeDir: string, dbPath: string): BuildResult {
       singleChunkFiles: stats.singleChunkFiles,
       avgChars: stats.avgChars,
       dbPath,
+      embedded: 0,
+      embeddingModel: '',
       error: e instanceof Error ? e.message : String(e),
     };
   }
@@ -158,7 +208,14 @@ export function formatReport(result: BuildResult): string {
     `  分块总数:   ${result.chunks}`,
     `  平均块大小: ${result.avgChars} 字符`,
     `  索引路径:   ${result.dbPath}`,
+    result.embedded > 0
+      ? `  语义向量:   ${result.embedded} 条（${result.embeddingModel}）`
+      : '  语义向量:   未生成（纯词法检索）',
   ];
+
+  if (result.embeddingError !== undefined) {
+    lines.push(`  ⚠ 向量化失败，已降级为纯词法：${result.embeddingError}`);
+  }
 
   if (result.singleChunkFiles.length > 0) {
     lines.push('');
