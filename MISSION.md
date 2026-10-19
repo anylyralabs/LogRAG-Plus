@@ -137,17 +137,13 @@
 
 ### 工程质量
 - 全量测试 **335 项全绿**（31 个文件）；
-  `tsc --noEmit` 与 `vue-tsc --noEmit` 均 0 错误。
-- **前端移出本仓库**：Nuxt 4 + Nuxt UI v4 的两个版本都已交付但用户对观感不满意，
-  按用户要求整体删除，前端另行开发。后端**保留静态托管能力**（`WEB_DIR` 可挂
-  `/logshare/`），未配置时服务为纯 API，`/v1/*` 不受影响。
+  `tsc --noEmit` 0 错误。
 - **写出 `API.md`**（本轮主要交付）：路由、字段、SSE 帧格式、错误码、管理接口三态、
   客户端实现要点。并用 `tests/api-doc.test.ts` 做**双向守门**——文档写了但代码没有、
   代码有但文档没写，都报错。写文档过程中核对出三处记忆偏差（`content` 不是 chat 的
   字段、records 分页是 `limit`/`offset` 而非 `page`、管理令牌也接受 Bearer 形态）。
-- **交互重构**：日志从「塞进消息的文本」变成「可被指认的文档」。新增
-  `GET /v1/log/{id}`（只读、不计配额）与 `LogPane`（分节跳转 / 错误行跳转 /
-  选行引用），结论改用 `EvidenceSpine` 脊柱而非卡片。补齐 16 项端点测试。
+- **日志成为可指认的文档**：新增 `GET /v1/log/{id}`（只读、不计配额），
+  让界面能分节跳转、按错误行导航、选行引用进对话。补齐 16 项端点测试。
 - **语义检索从脚手架变成真跑**：此前 `doc_embeddings` 表建了、配置读了，
   但**从不生成向量、也没有召回代码**，而 `semanticAvailable` 报的是配置值不是运行状态。
   现已接入 bge-m3（413 分块全量向量）与 bge-reranker-v2-m3，融合用 RRF，
@@ -174,11 +170,6 @@
   因为它记录的是「以为修好了其实没修好」的三个实例。
 - 新增**假模型端点**回归（`tests/agent-loop.test.ts`）：起一个 OpenAI 兼容的
   SSE 假端点，把「模型说什么」变成可断言的数据，主循环从此可在 CI 里回归。
-- **前端 `web/` 建成并跑通**：Vue 3 + Vite，对话页 + 管理页；产物由 Node
-  托管在 `/logshare/` 下（`/logshare/{日志ID}` 深链可用，已实测 200）。
-  新增 `tests/static-web.test.ts`（11 项）守静态托管与路径遍历；
-  `web/tests/sse-client.test.ts`（12 项）用「按字节切块」的假服务端守 SSE 增量解析
-  （含把 UTF-8 汉字切一半）。设计门控声明见 `web/README.md`。
 - **首次以编译产物运行**（`npm run build && node dist/server.js`）即暴露
   **3 个只在编译路径上出现的缺陷**：`.env` 与 `web/dist` 的默认位置由
   `import.meta.url` 推算（编译后指向 `dist/` 下，静默回落 → 模型「未配置」、
@@ -206,10 +197,8 @@
       26.3 SDL3 渲染器兼容、Mojang 401 噪音），3 条方法论移入 `prompts/`
       （读全文阈值、移动端先查 Renderer、web_search 429 即放弃），
       尾句「提示用户降级或等正式版」作为输出口径进 `prompts/output-spec.md`。
-- [x] `web/` 独立前端（对话页 + 管理页 + 自定义供应商配置）；产物由 Node 托管，
-      `/logshare/{日志ID}` 入口已实测可用。
-- [x] **Docker 编排（草稿，未经真机构建）**：`docker/Dockerfile`（四阶段：
-      前端 / 编译 / 生产依赖 / 运行时）+ `docker/compose.yaml`（单服务、端口只绑回环、
+- [x] **Docker 编排（草稿，未经真机构建）**：`docker/Dockerfile`（三阶段：
+      编译 / 生产依赖 / 运行时）+ `docker/compose.yaml`（单服务、端口只绑回环、
       SQLite 命名卷 + 索引只读挂载）+ 根 `.dockerignore`（关键：排除 `.env`）。
       开发机无容器运行时，因此改用了**镜像内容集等价验证**（按 COPY 逐条复制目录后
       以容器内路径启动，见 `docs/measurements.md` 第 12.1 节）；
@@ -217,9 +206,7 @@
       反代（TLS / 域名 / WAF）刻意不写进本编排，交由既有 nginx 一层完成。
 - [ ] **端到端复跑验证 7 个修复**：需先启动本地模型端点 `127.0.0.1:8765`
       （LogShare `127.0.0.1:9501` 未启动时走公网只读 `api.logshare.cn` 兜底）。
-      跑法：`bash tmp/e2e-run.sh kalkLqQ`；界面侧可直接开
-      `http://127.0.0.1:8788/logshare/kalkLqQ`（服务需已启动）。
-- [ ] 前端补自定义供应商连通性探测（目前只在服务端那侧有）。
+      跑法：`bash tmp/e2e-run.sh kalkLqQ`。
 - [ ] 继续扩知识库（`data/corpus/search_targets.jsonl` 66 214 条检索目标尚未逐条读）。
 - [ ] **提醒用户轮换 GitHub PAT 与线上 admin token**（已在会话中明文出现 3 次）。
 

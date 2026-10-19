@@ -369,14 +369,14 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 
 **实测补充**：`new URL(req.url, host)` 会解开百分号编码并**归一化 `..` 段**，
 于是 `/logshare/assets/%2e%2e/secret.txt` 到业务代码手上已是 `/logshare/secret.txt`，
-走的是 SPA 回退而不是 404。因此测试断言的不变量必须是「**永不返回 dist 之外的内容**」，
-而不是「返回 404」——后者会放过一个把文件内容当 200 返回的实现
-（`tests/static-web.test.ts`）。
+走的是 SPA 回退而不是 404。因此断言静态托管的不变量时，要写「**永不返回产物目录
+之外的内容**」，而不是「返回 404」——后者会放过一个把文件内容当 200 返回的实现。
 
-### 前端路径两处必须一致，且 dev 下不易发现
+### 前端挂载路径（给自行开发前端的人）
 
-`vite.config.ts` 的 `base` 与 `src/router.ts` 的 `createWebHistory` 都必须是
-`/logshare/`。写错的后果不同：前者资源 404（白屏），后者首屏正常但**刷新即 404**。
+前端挂 `/logshare/` 子路径。构建工具的 `base` 与路由库的 history base **必须同为**
+`/logshare/`。写错的后果不同：前者资源 404（白屏），后者首屏正常但**刷新即 404**；
+且前者在 dev 模式下常常看不出来，要到构建后才暴露。
 
 ### 本地模型端点始终返回 SSE
 
@@ -436,19 +436,14 @@ npx tsx scripts/verify-rag.ts       # RAG 检索验证（默认索引路径已�
 GITHUB_TOKENS=... npx tsx scripts/verify-github.ts  # GitHub 客户端验证
 python3 scripts/analyze_scores.py   # 生产语料评分复核（读 data/corpus/）
 
-# 前端（独立子项目，用 npm；产物由 Node 服务托管在 /logshare/ 下）
-cd web && npm run typecheck && npm run build
 ```
 
 **注意**：测试必须写成 `tests/*.test.ts`——写成 `tests/` 目录形式会失败。
 每个测试文件独立进程，因此可以在文件顶部直接设 `process.env`
-（`tests/static-web.test.ts` 就用这个特性在导入前指定 `WEB_DIR`）。
-前端测试在 `web/tests/`，同样由 `node --test --experimental-strip-types` 直跑
-（不需要浏览器：SSE 客户端只用 `fetch` + `ReadableStream`，测试里起一个
-「按字节切块」的假服务端就能把分块边界变成数据）。
+（`tests/path-bases.test.ts` 就用这个特性验证默认路径）。
 
-**前端未构建时服务照常可用**（纯 API）：`/logshare/*` 会落到普通 404。
-启动日志会明确打印「前端页面: 未构建（…）」，不要把它当成服务故障。
+**本仓库不含前端，服务以纯 API 形态运行**：`/logshare/*` 落普通 404，
+`/v1/*` 不受影响。启动日志会打印「前端页面: 未布置」，这是预期状态，不是故障。
 
 **知识库改动后必须重建索引**，否则新条目检索不到（`rag_search` 返回「索引不可用」
 或命中旧分块）。重建前先确认没有子代理在写 `knowledge/`
