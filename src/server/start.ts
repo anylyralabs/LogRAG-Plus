@@ -101,8 +101,8 @@ function onListening(server: Server, port: number, host: string, offset: number)
   console.log(`  健康检查: http://${shownHost}:${real}/health`);
   console.log(
     webBuilt()
-      ? `  前端页面: http://${shownHost}:${real}/logshare/`
-      : `  前端页面: 未构建（先在 web/ 下执行 npm run build；产物目录 ${webDir()}）`,
+      ? `  前端页面: http://${shownHost}:${real}/logshare/（产物目录 ${webDir()}）`
+      : '  前端页面: 未布置（本仓库不含前端；用 WEB_DIR 指向前端产物即可挂到 /logshare/）',
   );
   // 给脚本用的单行标记：重启脚本据此判断「真的起来了」，而不是 grep 人类可读横幅
   console.log(`READY port=${real}`);

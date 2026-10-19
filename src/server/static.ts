@@ -33,16 +33,22 @@ import { web as webCfg } from '../config.ts';
 /**
  * 前端产物目录。
  *
- * 默认值是**工作目录下的 `web/.output/public`**（Nuxt 静态产物）。
+ * **前端目前不由本仓库提供**（`web/` 已整体移除，前端另行开发）。
+ * 这个模块保留下来，是因为它承载的规则与前端框架无关：
+ * 「只有资源目录读盘、文件名限单段白名单、其余路径回退入口页」。
+ * 将来前端产物放在哪，只需 `WEB_DIR` 指过去；未配置或无产物时托管层整体跳过，
+ * 服务退化为纯 API（此时 `/logshare/*` 落到普通 404，不影响 `/v1/*`）。
+ *
+ * 默认值是**工作目录下的 `web/dist`**（与 Vite/Nuxt 等常见的 `dist` 习惯一致）。
  * 部署时可用 `WEB_DIR` 覆盖。`resolve` 只是为了把相对路径拍成绝对路径——
  * 它本身不做任何「是否在允许目录内」的判断，那件事由路由结构负责（见文件头）。
  *
  * 刻意不用「模块文件位置旁的产物目录」：源码运行时刚好正确，
- * 一旦编译到 `dist/src/` 就变成 `dist/web/dist`——路径错、文件不存在，
+ * 一旦编译到 `dist/src/`，相对模块位置的路径就会指到 `dist/web/dist`——路径错、文件不存在，
  * 表现是「服务正常、页面 404」，排查时极易被归因为反向代理配错。
  * 这与 `.env`、`DATA_DIR`、`PROMPTS_DIR` 的基准（工作目录）保持一致。
  */
-const DEFAULT_WEB_DIR = resolve(process.cwd(), 'web', '.output', 'public');
+const DEFAULT_WEB_DIR = resolve(process.cwd(), 'web', 'dist');
 const WEB_DIR = resolve(webCfg.dir !== '' ? webCfg.dir : DEFAULT_WEB_DIR);
 
 /** 前端挂载的子路径（与 vite 的 `base` 一致） */

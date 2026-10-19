@@ -88,16 +88,9 @@ src/
 │       ├── structured.ts    结尾结构化 JSON 解析
 │       └── tools/           工具集（log / rag / github / knowledge）
 
-web/                       独立前端（Nuxt 4 + Nuxt UI v4，npm；见 web/README.md）
-├── .output/public/       构建产物（后端默认从这里读；Vite 时代是 web/dist）
-├── app/assets/css/        main.css（字阶 + 结构件；配色不覆盖，沿用 Nuxt UI 默认）
-├── app/components/        ChatView（阅读区）/ EntryPanel（投放台）/ LogPanel（材料）
-│                          MessageItem / ConclusionSpine（判定→处置→依据）
-│                          MarkdownView（无 v-html）/ Composer / ProviderSheet / AdminView
-├── app/composables/       useChat.ts（对话状态机）
-├── app/lib/               api.ts（SSE 解析）、logdoc.ts（分节/严重度）、
-│                          structured.ts（结论 JSON 拆分）、types.ts
-└── app/pages/             index.vue / [id].vue（深链）/ admin.vue
+前端                        **不在本仓库**（另行开发）。后端保留静态托管能力：
+                            产物放哪由 WEB_DIR 指定，未配置时服务为纯 API，
+                            `/logshare/*` 落普通 404，`/v1/*` 不受影响。
 
 knowledge/                 RAG 知识库（领域知识，回答「这是什么、怎么修」）
 ├── patterns/              单签名 → 单故障的判据卡
@@ -309,40 +302,16 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 `./data/rag/index.db` → 构建报告「完成」、检索返回「不可用」，**两边各自都正常**。
 默认值已改为与构建输出一致。
 
-### 10. 前端：独立子项目，令牌层驱动，全程不用 `v-html`
+### 10. 前端不在本仓库，但接口契约在这里
 
-- **独立子项目**：`web/`（Vue 3 + Vite + TypeScript，**npm**），产物 `web/dist`
-  由 Node 服务托管在 `/logshare/` 下。不做服务端渲染：主用户是手机上的
-  启动器跳转用户，首包体积比首屏 SEO 重要，而这条路径没有任何 SEO 需求。
-- **设计门控**：走 FDS.Skill 的六要素（用户/设备/页面类型/浅深色/密度/例外）。
-  当时用户在赶进度，故按技能允许的「按默认开工并声明」路径执行，但其中四项
-  **有生产语料支撑而非猜测**（用户=手机启动器生态、设备=移动优先、
-  页面类型=对话页 WebApp + 管理页 Admin 拆开过各自的门、例外=无）。
-  完整声明与依据见 `web/README.md` 顶部——那张表是后续改设计的入口。
-- **令牌三层**（primitive → semantic → component），语义层是唯一决策层，
-  暗色只重映射语义层；组件样式只引用令牌，不出现裸色值。
-- **不用 `v-html`**：模型输出必然混着用户日志原文，`innerHTML` 就是一条
-  「日志内容 → 脚本执行」的通道。Markdown 解析成结构化节点后交给 Vue 模板渲染，
-  默认转义即免疫（`src/lib/structured.ts` + `MarkdownView.vue`）。
-- **空正文不渲染成功卡片**：后端空正文一律失败，前端跟着如实呈现（带「无结论」
-  徽章与下一步建议）。线上真实事故是「0 字答案 + 288 事件 + completed」，
-  界面上不得重演。
-- **自定义供应商的 API Key 只存 localStorage**，随请求逐次带上。无登录产品里
-  把用户密钥存服务端就必须回答「谁有权读它」；不存则这个问题不存在。
-- **管理接口的三态必须在界面上分开说**：未开启 → 404、未配令牌 → 仍 404、
-  令牌不匹配 → 401。合并成一句「访问被拒绝」会让运维去反复换令牌，
-  而不是去开配置项（`web/src/api/admin.ts`）。
-- **日志是一份可被指认的文档，不是一段塞进消息的文本**。主入口
-  `agent.logshare.cn/logshare/{id}` 的地址栏里只有一个 ID，前端拿不到正文，
-  于是「圈出某几行当证据」在旧设计上根本不成立。现在由
-  `GET /v1/log/{id}` 把正文与附件交给面板（`LogPane.vue` + `lib/logdoc.ts`），
-  用户可以按节跳转、按错误行跳转、选行区间「引用进对话」。
-  两条约束不能丢：**只读端点不消耗分析配额**（看一眼不等于分析一次），
-  **截断必须如实回报**（`truncated` / `omitted`，否则用户以为日志就这么长）。
-- **结论不用卡片，用「脊柱」**（`EvidenceSpine.vue`）：判定在上、处置居中、
-  依据其后且默认折叠。卡片无法表达三者的主次关系，而玩家要的正是「先做什么」。
-  这条替代了早先的 `ConclusionCard.vue`（已删除），组件清单以
-  `web/src/components/` 实际文件为准。
+前端由用户另行开发。本仓库的责任是**把接口说清楚**，见 `API.md`。
+
+- `API.md` 是唯一契约：路由、字段、SSE 帧格式、错误码、管理接口三态、客户端实现要点。
+- `tests/api-doc.test.ts` 双向守门：文档写了但代码没有 → 报错；代码有但文档没写 → 也报错。
+  这条比格式检查值钱——**新增接口忘了写文档是最常见的漂移方向**。
+- 后端保留静态托管（`src/server/static.ts`）：前端产物可用 `WEB_DIR` 挂到 `/logshare/`。
+  未配置或无产物时整体跳过，服务退化为纯 API。托管层的规则与前端框架无关，
+  因此保留：只有资源目录读盘、文件名限单段白名单、其余路径回退入口页。
 
 ## 环境适配（踩坑记录）
 
@@ -456,8 +425,7 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（后端 30 个文件 342 项 + 前端 web/tests 17 项）
-npm run test:web            # 只跑前端测试（SSE 增量解析 + 对比度守门）
+npm test                    # 全部单元测试（31 个文件 335 项）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
 bash scripts/restart.sh     # 重启服务（等端口释放 + 等 READY + 校验 /health，不靠 sleep 猜）

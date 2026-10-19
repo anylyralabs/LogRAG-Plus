@@ -12,8 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --experimental-strip-types tests/*.test.ts && npm run test:web",
-    "test:web": "node --test --experimental-strip-types web/tests/*.test.ts",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {

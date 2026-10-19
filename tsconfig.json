@@ -29,5 +29,5 @@
     "sourceMap": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
-  "exclude": ["node_modules", "dist", "web", "scripts/gh_deep.ts"]
+  "exclude": ["node_modules", "dist", "scripts/gh_deep.ts"]
 }

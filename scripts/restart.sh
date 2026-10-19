@@ -107,7 +107,12 @@ fi
 
 if curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$REAL_PORT/health"; then
   echo "  ✓ 健康检查通过 → http://127.0.0.1:$REAL_PORT"
-  echo "  ✓ 前端页面     → http://127.0.0.1:$REAL_PORT/logshare/"
+  # 前端不由本仓库提供：只有 WEB_DIR 指向了产物才报地址，否则如实说没有
+  if grep -q '前端页面: 未布置' "$LOG" 2>/dev/null; then
+    echo "  · 前端未布置（纯 API 模式；用 WEB_DIR 指向前端产物即可挂到 /logshare/）"
+  else
+    echo "  ✓ 前端页面     → http://127.0.0.1:$REAL_PORT/logshare/"
+  fi
 else
   echo "  ✗ 端口已监听但 /health 不通，日志："
   tail -20 "$LOG"
