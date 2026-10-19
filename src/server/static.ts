@@ -33,16 +33,16 @@ import { web as webCfg } from '../config.ts';
 /**
  * 前端产物目录。
  *
- * 默认值是**工作目录下的 `web/dist`**（即「从项目根启动」这一约定的产物），
+ * 默认值是**工作目录下的 `web/.output/public`**（Nuxt 静态产物）。
  * 部署时可用 `WEB_DIR` 覆盖。`resolve` 只是为了把相对路径拍成绝对路径——
  * 它本身不做任何「是否在允许目录内」的判断，那件事由路由结构负责（见文件头）。
  *
- * 刻意不用「模块文件位置旁的 web/dist」：源码运行时那是 `<root>/web/dist`，
+ * 刻意不用「模块文件位置旁的产物目录」：源码运行时刚好正确，
  * 一旦编译到 `dist/src/` 就变成 `dist/web/dist`——路径错、文件不存在，
  * 表现是「服务正常、页面 404」，排查时极易被归因为反向代理配错。
  * 这与 `.env`、`DATA_DIR`、`PROMPTS_DIR` 的基准（工作目录）保持一致。
  */
-const DEFAULT_WEB_DIR = resolve(process.cwd(), 'web', 'dist');
+const DEFAULT_WEB_DIR = resolve(process.cwd(), 'web', '.output', 'public');
 const WEB_DIR = resolve(webCfg.dir !== '' ? webCfg.dir : DEFAULT_WEB_DIR);
 
 /** 前端挂载的子路径（与 vite 的 `base` 一致） */
@@ -50,6 +50,7 @@ const BASE = '/logshare';
 
 /** 单段资源文件名：**不允许**分隔符、`..`、编码字符 */
 const ASSET_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
 
 const MIME: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
@@ -130,15 +131,17 @@ export function serveWeb(path: string, method: string, res: ServerResponse): boo
   const rest = path.slice(BASE.length + 1); // 去掉 `/logshare/`
 
   // 资源文件：唯一会真正读盘的路径
-  if (rest.startsWith('assets/')) {
-    const name = rest.slice('assets/'.length);
+  // 资源目录：Nuxt 产出 `_nuxt/`，Vite 产出 `assets/`，两者都接受
+  const assetDir = ['_nuxt/', 'assets/'].find((d) => rest.startsWith(d));
+  if (assetDir !== undefined) {
+    const name = rest.slice(assetDir.length);
     if (!ASSET_NAME_RE.test(name)) {
       res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, error: '资源不存在' }));
       return true;
     }
 
-    const file = join(WEB_DIR, 'assets', name);
+    const file = join(WEB_DIR, assetDir.replace(/\/$/, ''), name);
     if (!existsSync(file) || !statSync(file).isFile()) {
       res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, error: '资源不存在' }));

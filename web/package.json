@@ -3,24 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "LogRAG+ 前端：对话式日志排障界面（移动优先）",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "typecheck": "vue-tsc --noEmit",
-    "preview": "vite preview"
+    "dev": "nuxt dev",
+    "build": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "typecheck": "nuxt typecheck"
   },
   "dependencies": {
-    "@fontsource/ibm-plex-mono": "^5.1.1",
-    "@fontsource/ibm-plex-sans": "^5.1.1",
-    "vue": "^3.5.13",
-    "vue-router": "^4.5.0"
+    "@nuxt/ui": "^4.12.0",
+    "nuxt": "^4.6.2",
+    "vue": "^3.5.24",
+    "vue-router": "^4.6.3"
   },
   "devDependencies": {
-    "@types/node": "^24.19.2",
-    "@vitejs/plugin-vue": "^5.2.1",
-    "typescript": "^5.7.3",
-    "vite": "^6.0.7",
-    "vue-tsc": "^2.2.0"
+    "vue-tsc": "^2.2.0",
+    "typescript": "^5.7.3"
   }
 }

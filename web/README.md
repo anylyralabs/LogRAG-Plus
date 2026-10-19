@@ -1,60 +1,87 @@
-# LogRAG+ Web 前端
+# LogRAG+ 前端（Nuxt 4 + Nuxt UI v4）
 
 对话式日志排障界面。构建产物由 Node 服务托管在 `/logshare/` 子路径下，
 入口形态是 `https://agent.logshare.cn/logshare/{日志ID}`（由 LogShare 跳转过来）。
 
-## 设计门控声明（按 FDS.Skill 要求，开工前收齐六要素）
+## 设计方向：勘验卷宗
 
-技能规定「六要素没齐不许开工，宁可多问一轮」。当时用户在赶进度，因此这里采取
-技能许可的另一条路径：**用证据推定 + 技能默认值补齐，并在最前面声明**。
-凡与预期不符，改动集中在 `src/styles/tokens.css`（令牌层）与 `src/styles/base.css`
-（基础件），不需要动任何业务组件。
+这不是一个聊天窗口，而是一份**可以翻阅的现场记录**。排版据此决定，配色不据此决定。
 
-| # | 要素 | 取值 | 依据 |
-|---|---|---|---|
-| 1 | 目标用户 | **终端用户为主**（手机 Minecraft 玩家），管理员为辅 | 生产语料里上传来源集中在 FCL / ZL2 / Pojav / axolotl 等手机启动器；管理员只有运维本人 |
-| 2 | 设备 | **移动优先**，同时适配桌面 | 与上同一份证据：用户从启动器内跳转，手机浏览器/WebView 是主场景 |
-| 3 | 页面类型 | 拆两型：对话页 **WebApp**、管理页 **Admin** | 技能规定「类型模糊 ⇒ 拆两页分别过门控」，因此两页密度不同 |
-| 4 | 浅深色 | **跟随系统 + 手动覆盖**（两套都实现） | 技能默认「跟随系统」；两套都做 ⇒ 不需要靠猜 |
-| 5 | 密度 | 对话页 comfortable（触控目标 ≥40px）；管理页 compact（表格行 36px） | 技能规定 compact 仅用于表格/Console |
-| 6 | 例外 | 无（不使用 Material You / Material Design / 莫奈低饱和渐变） | 用户全局约定亦禁止高饱和渐变 |
+**配色全部沿用 Nuxt UI 默认**（primary=green / neutral=slate / error=red / warning=yellow），
+不做任何覆盖。唯一的例外是圆角收到 `0.125rem`——纸不是胶囊。
 
-配色取自 FDS 的 `assets/tokens/tokens.json`：Zinc 中性 + 单一 indigo 强调色，
-语义层（semantic）是唯一决策层，暗色只重映射语义层。
+**排版原则**（这是重做时真正变化的部分）：
+
+| 手段 | 用它做什么 | 刻意不用什么 |
+|---|---|---|
+| 发丝线 `border-b` | 分隔栏与栏 | 卡片包裹、圆角、阴影 |
+| 字阶 5 档 | 表达层级（10/11/13/15/21px） | 10 档半像素字号（改前实测） |
+| `.dossier-label` | 栏目标记（中文 + 一条线） | 全大写 eyebrow、中间点拼的 meta |
+| 等宽 | 编号、行号、日志、计数 | 把它当装饰性小字 |
+| 左对齐 | 全部正文 | 居中摆段落 |
+
+**三个结构决定**：
+
+1. **结论在前，正文在后，取证过程收起。** 玩家先要知道「是什么、该怎么做」，
+   依据是支撑不是主角。结论用「判定 → 处置 → 依据」的竖线结构，
+   不用卡片——卡片表达不出三者的主次。
+2. **编号只用在真是序列的地方。** 「处置」的步骤是序列，所以有 `01 02 03`；
+   其余地方不编号（编号当装饰是通用模板最常见的痕迹）。
+3. **材料与报告分栏。** 宽屏左边是原始日志（材料），右边是报告；窄屏日志进抽屉——
+   2600 行日志不该挤掉输入框。
+
+**行长**用 `em` 而不是 `ch`：`1ch` ≈ 半个汉字宽，用 `ch` 会让中文行宽翻倍。
+正文 `max-w-[34em]`（约 34 个汉字），标题 `19em`。
+
+## 可访问性（有数值守门）
+
+`tests/contrast.test.ts` 用 Nuxt UI 默认色板的语义取值算 WCAG 对比度，
+覆盖深色与浅色两套主题的 7 组「前景/背景」组合，纯计算、无依赖。
+
+实测发现并修掉的两处：
+
+| 问题 | 实测 | 处置 |
+|---|---|---|
+| 浅色下行号用 `text-dimmed` | 2.34:1 | 改用 `toned`（7.58:1） |
+| 浅色主按钮默认 green-600 白字 | 3.30:1 | 组件层压到 green-700（5.02:1） |
+
+另外：`:focus-visible` 全局定义；日志行可 `Tab` 聚焦、`Enter`/`Space` 选取；
+`prefers-reduced-motion` 下关掉过渡。
 
 ## 开发与构建
 
 ```bash
 cd web
-npm install          # 注意用 npm：本机 pnpm 在 Termux 上报 lock_shared() not supported
-npm run dev          # http://127.0.0.1:5173/logshare/ ，已把 /v1 与 /health 代理到 8788
-npm run typecheck    # vue-tsc --noEmit
-npm run build        # 产物到 web/dist，由 Node 服务在 /logshare/ 下托管
+npm install          # 用 npm：本机 pnpm 在 Termux 上报 lock_shared() not supported
+npm run dev          # http://127.0.0.1:5173/logshare/ ，/v1 与 /health 已代理到 8788
+npm run build        #  → .output/public（后端默认从这个目录读）
+npm run typecheck    # vue-tsc
 ```
 
-后端默认端口 8788（见根目录 `.env`）。前端默认**同源**请求，因此生产不需要 CORS；
-需要跨源调试时在「设置 → 接口地址」里填后端地址（存 localStorage，可随时清空）。
-
-### 路径只在两处，且必须一致
-
-| 位置 | 值 | 写错的后果 |
-|---|---|---|
-| `vite.config.ts` 的 `base` | `/logshare/` | 资源 404（页面白屏） |
-| `src/router.ts` 的 `createWebHistory` base | `/logshare/` | 首屏正常、刷新后 404 |
+**构建产物路径是 `web/.output/public`**，不是 Vite 时代的 `web/dist`。
+后端 `src/server/static.ts` 的默认值与之对应；`_nuxt/` 与旧的 `assets/` 都按
+「单段文件名 + 白名单字符集」放行，路径遍历在结构上不可能。
 
 ## 目录
 
 ```
-src/
-├── api/          client.ts（SSE 增量解析）、admin.ts（管理接口 + 错误语义）、types.ts
-├── components/   Icon / MarkdownView / TimelinePanel / MessageItem / EvidenceSpine
-│                 LogPane（日志面板）/ EntryPlate（未绑定日志时的入口）
-│                 Composer / ProviderSheet
-├── lib/          structured.ts（结论块拆分 + Markdown 解析）、format.ts
-│                 logdoc.ts（日志分节 / 严重度粗筛 / 行窗口）
-├── pages/        ChatPage.vue（主入口）、AdminPage.vue（领域知识 + 分析记录）
-├── stores/       chat.ts（对话状态机）、settings.ts（主题/供应商/令牌）
-└── styles/       tokens.css（三层令牌）、base.css（基础件，只引用令牌）
+app/
+├── app.vue               卷宗头（身份 + 当前日志编号 + 两个图标开关）
+├── app.config.ts         只设圆角；配色不覆盖
+├── assets/css/main.css   字阶、结构件（dossier-label / rule / evidence / line-no）
+├── components/
+│   ├── ChatView.vue      阅读区（材料栏 + 报告栏 + 命令行）
+│   ├── EntryPanel.vue    投放台（三条途径，发丝线表格）
+│   ├── LogPanel.vue      日志面板（分节跳转、错误行导航、选行引用）
+│   ├── MessageItem.vue   一条记录（结论 → 正文 → 取证过程）
+│   ├── ConclusionSpine.vue  判定 → 处置 → 依据
+│   ├── MarkdownView.vue  无 v-html 的 Markdown 渲染
+│   ├── Composer.vue      命令行（左侧 › 提示符）
+│   ├── ProviderSheet.vue 供应商设置
+│   └── AdminView.vue     管理页（同一套排版语言，无卡片）
+├── composables/useChat.ts  对话状态机（SSE 帧 → 界面数据）
+└── lib/                  api.ts（SSE 解析）、logdoc.ts（分节/严重度）、
+                          structured.ts（结论 JSON 拆分）、types.ts
 ```
 
 ## 三个刻意的实现决定
@@ -63,35 +90,11 @@ src/
 用户自己贴的 HTML 都是常态）。`MarkdownView` 把文本解析成结构化节点后交给
 Vue 模板渲染，Vue 默认转义——XSS 从机制上不成立，而不是靠过滤器拦截。
 
-**二、`/logshare/{日志ID}` 是「SPA 深链」，不是文件路径。** 服务端
-（`src/server/static.ts`）只有 `assets/` 目录会真正读盘，且文件名必须匹配
-`^[A-Za-z0-9._-]+$`；其余任何路径一律返回 `index.html`。这样「构造一个
-奇怪路径去读文件」在语义上不可能发生，而不是「试图拦住它」。
+**二、`/logshare/{日志ID}` 是 SPA 深链，不是文件路径。** 服务端只有资源目录会读盘，
+且文件名必须匹配 `^[A-Za-z0-9._-]+$`；其余任何路径一律返回入口页。
 
-**三、空正文不渲染成功卡片。** 后端在撞轮次上限、上游截断、模型没吐字三种
-情况下都会先补一次收尾轮，仍为空就如实报失败。前端跟着如实呈现：这类消息带
-「无结论」徽章并给出下一步建议。线上真实事故就是「0 字答案 + 288 个事件 +
-报 completed」，界面上不能重演它。
-
-## 与后端接口的对应
-
-| 前端动作 | 接口 |
-|---|---|
-| 发一轮对话（SSE） | `POST /v1/chat` |
-| 回放会话 | `GET /v1/session/{id}` |
-| 上传日志（脱敏 + 去重 + 异步反混淆） | `POST /v1/upload` |
-| 日志面板取正文与附件（只读、不计配额） | `GET /v1/log/{id}` |
-| 上传时展示的配额余量 | 响应中的 `remaining` |
-| 管理页领域知识 CRUD / 性质判定 / 注入预览 / 留痕 | `/v1/admin/domain-knowledge*` |
-| 管理页分析记录看板 | `/v1/admin/records*` |
-
-管理接口的鉴权语义必须区分三种失败，见 `src/api/admin.ts` 顶部说明：
-未开启 → 404、未配令牌 → 仍 404、令牌不匹配 → 401。把 404 说成「令牌错误」
-会让运维去反复换令牌，而不是去开配置项。
+**三、自定义供应商的 API Key 只存 localStorage**，随请求逐次带上，不落服务端。
 
 ## 待办
 
-- 图标目前是**描边（stroke）**风格（与 FDS 的「描边图标」一致），而项目全局
-  约定写的是「图标优先采用非线性图标」。两者冲突，已把整份图标数据收敛在
-  `src/icons.ts`，需要改成实心风格时只动这一个文件。
-- 自定义供应商的连通性探测（现在只在服务端 `Config::test-ai` 那侧有）。
+- 自定义供应商的连通性探测（服务端已有 `/config/test-ai`，前端未接）。

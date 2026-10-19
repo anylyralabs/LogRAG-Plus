@@ -10,7 +10,7 @@
  * | 位置 | 原实现（源码直跑正确） | 编译后实际指向 | 后果 |
  * |---|---|---|---|
  * | `.env` | `<root>/.env` | `dist/.env`（不存在） | 配置全部回落默认：默认模型「未配置」、配额 1000/日 → 30/日 |
- * | `web/dist` | `<root>/web/dist` | `dist/web/dist`（不存在） | 页面 404，但接口一切正常 |
+ * | 前端产物目录 | `<root>/web/.output/public` | `dist/web/.output/public`（不存在） | 页面 404，但接口一切正常 |
  *
  * 因此这里的断言分两层：
  * 1. **值**：默认基准必须落在工作目录下（与 `DATA_DIR`/`PROMPTS_DIR` 一致）。
@@ -31,9 +31,11 @@ test('.env 的位置由工作目录决定', () => {
   assert.equal(dotEnvPath(), join(ROOT, '.env'));
 });
 
-test('前端产物目录默认落在工作目录下的 web/dist', () => {
-  // 测试进程未设 WEB_DIR，故走默认分支
-  assert.equal(webDir(), resolve(ROOT, 'web', 'dist'));
+test('前端产物目录默认落在工作目录下的 web/.output/public', () => {
+  // 测试进程未设 WEB_DIR，故走默认分支。
+  // Nuxt 的静态产物在 `web/.output/public`（Vite 时代是 `web/dist`），
+  // 这条断言绑定的是「后端默认去哪个目录找产物」，换前端框架必须同步改这里。
+  assert.equal(webDir(), resolve(ROOT, 'web', '.output', 'public'));
 });
 
 test('数据目录基准同为工作目录（三处约定一致）', () => {

@@ -28,12 +28,15 @@ const SECRET_BODY = 'TOP-SECRET-DO-NOT-SERVE';
 
 writeFileSync(secret, SECRET_BODY, 'utf8');
 mkdirSync(join(webRoot, 'assets'), { recursive: true });
+mkdirSync(join(webRoot, '_nuxt'), { recursive: true });
 writeFileSync(
   join(webRoot, 'index.html'),
   '<!doctype html><title>SPA-ENTRY</title><div id="app"></div>',
   'utf8',
 );
 writeFileSync(join(webRoot, 'assets', 'app-abc123.js'), 'console.log("ASSET-OK")', 'utf8');
+// Nuxt 的产物目录；后端必须同样只放行「单段文件名」
+writeFileSync(join(webRoot, '_nuxt', 'entry.CMJZ15QX.css'), '/* NUXT-OK */', 'utf8');
 
 // 必须在导入 static.ts 之前设置：模块加载时就把目录解析成了常量
 process.env['WEB_DIR'] = webRoot;
@@ -192,4 +195,13 @@ test('不存在的资源返回 404 而不是回退到入口页', async () => {
 test('接口路由不会被静态托管吞掉', async () => {
   const res = await raw('POST', '/v1/chat');
   assert.equal(res.body, JSON.stringify({ ok: false, error: 'fallthrough' }));
+});
+
+test('Nuxt 的 _nuxt/ 资源目录同样按单段文件名放行', async () => {
+  const res = await raw('GET', '/logshare/_nuxt/entry.CMJZ15QX.css');
+  assert.equal(res.status, 200);
+  assert.equal(res.body, '/* NUXT-OK */');
+  // 带子目录的路径不得被当作资源读取（否则就绕过了单段约束）
+  const nested = await raw('GET', '/logshare/_nuxt/../secret.txt');
+  assert.equal(nested.body.includes('SECRET'), false);
 });

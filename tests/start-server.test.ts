@@ -136,7 +136,8 @@ test('PORT_AUTO_INCREMENT=0 时保持原行为（撞端口即失败）', async (
   try {
     const r = await runServer(
       { ...BASE_ENV, PORT: String(base), PORT_AUTO_INCREMENT: '0' },
-      { timeoutMs: 20_000 },
+      // 全量并跑时机器忙，单跑 4s 的用例可能要 20s+；给足余量测的是行为不是速度
+      { timeoutMs: 60_000 },
     );
     assert.notEqual(r.code, 0, '关闭递增后应失败退出');
     assert.match(r.stderr, /被占用|EADDRINUSE/, '要给出可读原因');

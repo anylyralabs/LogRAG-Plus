@@ -7,3 +7,8 @@ data/
 .DS_Store
 coverage/
 tmp/
+
+# Nuxt 构建产物
+web/.output/
+web/.nuxt/
+web/.data/

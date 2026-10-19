@@ -88,17 +88,16 @@ src/
 │       ├── structured.ts    结尾结构化 JSON 解析
 │       └── tools/           工具集（log / rag / github / knowledge）
 
-web/                       独立前端（Vue 3 + Vite，npm；见 web/README.md）
-├── src/api/               SSE 增量解析、管理接口、类型契约（含 `GET /v1/log` 契约）
-├── src/components/        Icon / MarkdownView / TimelinePanel / MessageItem / EvidenceSpine
-│                          日志三件：LogPane（面板）/ EntryPlate（未绑定日志时的入口）
-│                          输入与设置：Composer / ProviderSheet
-├── src/lib/               structured.ts（结构化块拆分 + Markdown 解析，无 v-html）
-│                          logdoc.ts（日志分节 / 严重度粗筛 / 行窗口）
-│                          format.ts（展示格式化）
-├── src/pages/             ChatPage（主入口）、AdminPage（领域知识 + 分析记录）
-├── src/stores/            对话状态机、本地设置
-└── src/styles/            三层设计令牌 + 基础件
+web/                       独立前端（Nuxt 4 + Nuxt UI v4，npm；见 web/README.md）
+├── .output/public/       构建产物（后端默认从这里读；Vite 时代是 web/dist）
+├── app/assets/css/        main.css（字阶 + 结构件；配色不覆盖，沿用 Nuxt UI 默认）
+├── app/components/        ChatView（阅读区）/ EntryPanel（投放台）/ LogPanel（材料）
+│                          MessageItem / ConclusionSpine（判定→处置→依据）
+│                          MarkdownView（无 v-html）/ Composer / ProviderSheet / AdminView
+├── app/composables/       useChat.ts（对话状态机）
+├── app/lib/               api.ts（SSE 解析）、logdoc.ts（分节/严重度）、
+│                          structured.ts（结论 JSON 拆分）、types.ts
+└── app/pages/             index.vue / [id].vue（深链）/ admin.vue
 
 knowledge/                 RAG 知识库（领域知识，回答「这是什么、怎么修」）
 ├── patterns/              单签名 → 单故障的判据卡
@@ -457,8 +456,8 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（后端 30 个文件 341 项 + 前端 web/tests 15 项）
-npm run test:web            # 只跑前端测试（SSE 增量解析）
+npm test                    # 全部单元测试（后端 30 个文件 342 项 + 前端 web/tests 17 项）
+npm run test:web            # 只跑前端测试（SSE 增量解析 + 对比度守门）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
 bash scripts/restart.sh     # 重启服务（等端口释放 + 等 READY + 校验 /health，不靠 sleep 猜）
