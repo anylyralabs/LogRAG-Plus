@@ -46,10 +46,17 @@ Java 运行时按特定指令集编译，某些设备/容器环境不提供该�
 
 ### 触发 D：JVM 参数不当
 
-| 参数 | 问题 |
+**注意本节只适用于 Android 移动端。** PC 服务端的情况**相反**：
+`-Xms` 设为与 `-Xmx` 相等是 Aikar's flags 等服务端方案的推荐做法
+（如 `-Xms4096M -Xmx4096M`），目的是避免堆扩张带来的 GC 停顿与 CPU 开销，
+配合 `-XX:+AlwaysPreTouch` 在启动时一次预触。两者不矛盾，因为约束条件不同：
+PC 服务端有独占的物理内存，而 Android 上 JVM 要与系统、启动器、GPU 驱动共享同一块内存，
+且系统会在压力下直接杀进程。
+
+| 参数 | 问题（仅限移动端） |
 |---|---|
-| `-Xms` 等于 `-Xmx` 且值过大 | 启动即占用全部内存，易被系统 OOM Killer 杀掉 |
-| `-Xmx` 超过设备物理内存的一半 | 同上 |
+| `-Xms` 等于 `-Xmx` 且值过大 | 启动即申请并 commit 全量堆，系统内存立刻见底，易被 OOM Killer 杀掉 |
+| `-Xmx` 超过设备物理内存的一半 | 同上；JVM 常驻内存 ≈ 堆 + 元空间(150–400MB) + 线程栈 + 原生库 |
 | `-XX:ActiveProcessorCount=8` | 强制线程数，部分驱动（Mali）多线程处理异常 |
 
 已知实例：`-Xms15231m -Xmx15231m`（设备物理内存约 14.9GB）→ 原生内存耗尽 → SurfaceFlinger 的 binder 事务损坏 → `libbinder.so` 中 `finishUnflattenBinder` 触发 SIGSEGV。
