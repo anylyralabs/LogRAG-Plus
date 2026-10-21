@@ -5,7 +5,8 @@ AI 日志排障服务。读取 Minecraft 崩溃日志，给出带证据的根因
 - 默认监听 `http://127.0.0.1:8788`（`HOST` / `PORT` 可改；端口被占用时自动递增）
 - 全部接口返回 JSON，**对话接口返回 SSE 流**
 - 管理接口默认关闭，需显式开启并配令牌
-- 本仓库**不含前端**。前端产物可用 `WEB_DIR` 挂到 `/logshare/`，未配置时服务为纯 API
+- 页面分工：`/` 是官网首页（静态 `landing.html`），`/logshare/` 是应用（打开即聊天）。
+  两者刻意分开——第一次来的人先看「这是什么」，而不是先面对输入框。
 
 ---
 
@@ -56,6 +57,28 @@ access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS
 ```
 
 `OPTIONS` 预检返回 `204`。同源部署时无需处理。
+
+### 响应压缩
+
+服务端支持 **Brotli 与 gzip**，按请求的 `Accept-Encoding` 自动协商，`br` 优先。
+
+| 条件 | 行为 |
+|---|---|
+| 正文 ≥ 1 KB 且客户端支持 | 压缩，并带 `content-encoding` 与 `vary: accept-encoding` |
+| 正文 < 1 KB | 不压缩（压缩帧开销会抵消收益） |
+| `text/event-stream`（SSE） | **绝不压缩**——压了就失去逐帧到达的语义 |
+| 已压缩格式（图片 / 字体 / zip） | 不二次压缩 |
+
+实测效果（`GET /v1/log/{id}`，2604 行日志）：
+
+| 编码 | 大小 |
+|---|---:|
+| 未压缩 | 265,720 字节 |
+| gzip | 51,766 字节 |
+| **brotli** | **35,761 字节**（减少 86%） |
+
+移动端建议始终带上 `Accept-Encoding: br, gzip`：主要用户是手机上的玩家，
+不压缩等于每次打开日志面板多花几百 KB 流量。
 
 ### 客户端标识（配额）
 
@@ -132,7 +155,7 @@ Accept: text/event-stream
 | `logId` | 否 | 绑定的日志 ID（七位）。会话一旦绑定，后续轮次可省略 |
 | `sessionId` | 否 | 延续既有会话。省略则按 `logId` 复用或新建 |
 | `fingerprint` | 否 | 设备指纹（配额用） |
-| `provider` | 否 | 自定义模型供应商。省略则用服务端默认 |
+| `provider` | 否 | 自定义模型供应商。省略则用服务端默认。**自定义地址会做 SSRF 校验**：私网、链路本地、保留地址一律 400；回环地址需服务端开启 `ALLOW_LOOPBACK_PROVIDER` |
 | `logContent` | 否 | 直接传日志正文（免去按 ID 取回）。与 `logId` 同时给时以 `logContent` 为准 |
 
 **会话解析优先级**：
@@ -178,6 +201,14 @@ data: {"type":"thinking","delta":"先看最后 200 行…"}
 | `limit` | `rounds` | 已达工具轮次上限，即将进入收尾 |
 | `reflection` | `message` | 状态说明（如「检测到重复检索，正在整理结论」） |
 | `queued` | `message` | 排队中（启用微队列时） |
+| `ask` | `questions[]`, `reason?` | 模型向你提问（`ask_user`）。**必须渲染成可作答的块**，不要从正文里正则抠问句 |
+
+**关于 `ask` 帧**：追问是用户需要回答的东西，因此它有两个通道：
+1. 流内的 `ask` 帧（当轮即可渲染）；
+2. `done` 帧的 `asks` 字段（兜底：代理缓冲可能合并/丢弃状态帧）；
+3. 落库到消息的 `meta.asks`（刷新、换设备回放后仍能作答）。
+
+前端应当以**消息里的 `asks`** 为准，`done.asks` 只用于补齐当轮。
 
 #### 正文帧
 
@@ -212,6 +243,7 @@ data: {
 | `nearLimit` | 仅在接近上限时出现（布尔） |
 | `score` | 自评。`grounding` 按「结论中的引用能否在日志里核对上」打分，**不按工具调用次数** |
 | `score.missingAnchors` | 正文里声称有依据但未能核对的条目，可据此提示用户「这几条我没办法确认」 |
+| `asks` | 本轮模型提出的追问（`[{ questions: string[], reason?: string }]`）。与状态帧 `ask` 同源，可作兜底 |
 
 #### 错误帧
 
@@ -231,6 +263,17 @@ data: {"error":"分析失败：上游返回 502"}
 ```
 
 按 SSE 规范忽略以 `:` 开头的行即可。
+
+### 追问（`ask_user`）的恢复语义
+
+模型在信息不足时会调用 `ask_user` 提问。这个问题不是一次性提示：
+
+- 当轮：`status` 帧 `type=ask`，前端立刻渲染输入块；
+- 结束：`done.asks` 再带一份，防止状态帧被代理合并；
+- 回放：`GET /v1/session/{id}` 的 `messages[].meta.asks` 原样返回。
+
+「是否已回答」不需要额外字段——**其后是否出现过用户消息**就是判据，
+对话历史本身是唯一事实来源。
 
 ### 空正文的处理
 
@@ -299,6 +342,10 @@ data: {"error":"分析失败：上游返回 502"}
 **结果缓存**：成功结果进程内缓存 5 分钟（同 ID 直接命中）。**失败不缓存**——
 上游抖动恢复后应能立即读到。
 
+传 `?refresh=1` 可跳过缓存，强制回上游重新读取。刚上传的日志可能仍在异步反混淆，
+界面上的「刷新」必须走这条路径——否则用户会一直看到同一份未反混淆的正文，
+而界面还显示「反混淆处理中」，看起来像刷新按钮坏了。
+
 **错误**
 
 | 状态 | 场景 |
@@ -319,19 +366,56 @@ data: {"error":"分析失败：上游返回 502"}
 ```json
 {
   "ok": true,
-  "sessionId": "smvbpsiilbn2nl0p6",
-  "logId": "kalkLqQ",
+  "session": {
+    "id": "smvbpsiilbn2nl0p6",
+    "logId": "kalkLqQ",
+    "createdAt": 1729000000,
+    "expiresAt": 1731600000
+  },
+  "rounds": { "allowed": true, "remaining": 9 },
   "messages": [
     { "role": "user", "content": "这份日志为什么崩溃？", "createdAt": 1729000000 },
     {
       "role": "assistant",
       "content": "根因是…",
+      "reasoning": "先看崩溃锚点…",
+      "meta": {
+        "asks": [
+          {
+            "questions": ["你的手机是什么型号？", "启动器里用的是哪个渲染器？"],
+            "reason": "渲染器兼容性依赖具体 GPU，日志里没有记录"
+          }
+        ]
+      },
       "createdAt": 1729000012,
-      "score": { "overall": 92, "deliverable": true, "dimensions": {}, "deductions": [], "missingAnchors": [] }
+      "score": {
+        "overall": 92,
+        "deliverable": true,
+        "dimensions": {
+          "grounding": 79,
+          "verification": 100,
+          "actionability": 100,
+          "economy": 100
+        },
+        "deductions": ["6 条断言没有可核实的标识…"],
+        "missingAnchors": []
+      }
     }
   ]
 }
 ```
+
+| 字段 | 说明 |
+|---|---|
+| `session.id` | 会话 ID。**不是**顶层 `sessionId`，前端从 `session.id` 取 |
+| `session.logId` | 绑定的日志 ID，可为 `null` |
+| `rounds` | 本会话剩余轮次，用于提示「还能追问几轮」 |
+| `messages[].reasoning` | 思维链。仅 assistant 且非空时出现；旧消息可能没有 |
+| `messages[].score` | 自评摘要。仅 assistant 且当时评分成功时出现；形状与 `done` 帧的 `score` 一致（不含 `recordId`） |
+| `messages[].meta.asks` | 本轮追问。**必须渲染成可作答的块**——只把它当正文展示，用户就永远回不了这一问 |
+
+**为什么评分要持久化**：`done` 帧里的自评只在当次流里存在。若不落库，刷新页面后
+「哪些引用没在日志里核对到」就消失了，而这正是复核一次分析最需要的信息。
 
 | 状态 | 场景 |
 |---|---|
@@ -375,16 +459,32 @@ data: {"error":"分析失败：上游返回 502"}
 ### 响应 200
 
 ```json
-{ "ok": true, "logId": "kalkLqQ", "remaining": 4, "maybeObfuscating": true }
+{
+  "ok": true,
+  "logId": "kalkLqQ",
+  "maybeObfuscating": true,
+  "token": "删除令牌（仅上传时返回一次）",
+  "notes": ["已忽略空文件 empty.log"],
+  "remaining": 4
+}
 ```
 
-`maybeObfuscating: true` 表示反混淆可能仍在后台进行（创建后 60 秒内）。
-此时读 `/v1/log/{logId}` 拿到的可能是未反混淆的正文。
+| 字段 | 说明 |
+|---|---|
+| `logId` | 新日志的七位 ID。**字段名是 `logId`**，不是 `id` |
+| `maybeObfuscating` | 刚创建时恒为 `true`：反混淆是异步任务，60 秒内可能尚未完成。此时读 `/v1/log/{logId}` 拿到的可能是未反混淆的正文 |
+| `token` | 删除令牌，只在本次响应下发一次；要保留就由前端自己保管 |
+| `notes` | 非致命提示，如「已忽略空文件 x」「来源标识格式不符，已忽略」 |
+| `remaining` | 今日剩余上传次数 |
+
+`maybeObfuscating: true` 时界面应提示「反混淆处理中」，并允许稍后刷新正文；
+**不要**据此判定分析必然失败。
 
 | 状态 | 场景 |
 |---|---|
 | 400 | 校验失败（`error` 说明具体哪一条） |
-| 429 | 上传配额用尽，带 `remaining: 0` |
+| 429 | 上传配额用尽，带 `remaining: 0` 与 `retryAfterSeconds` |
+| 502 | LogShare 请求合法但上游写入失败 |
 | 503 | 未配置 LogShare 上传能力 |
 
 ---
@@ -463,7 +563,7 @@ Authorization: Bearer <ADMIN_TOKEN>
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/v1/admin/domain-knowledge` | 列表 |
-| POST | `/v1/admin/domain-knowledge` | 新增（`{ "text": "…" }`，单条 ≤ 200 字） |
+| POST | `/v1/admin/domain-knowledge` | 新增（`{ "content": "…" }`，单条 ≤ 200 字；`text` 是旧文档笔误，服务端只认 `content`） |
 | POST | `/v1/admin/domain-knowledge/analyze` | 判断一段文本的性质（是否适合作为领域知识） |
 | GET | `/v1/admin/domain-knowledge/audit` | 变更留痕（`?limit=`） |
 | GET | `/v1/admin/domain-knowledge/injection` | 预览实际注入到提示词的文本 |
@@ -497,11 +597,14 @@ Authorization: Bearer <ADMIN_TOKEN>
 | `orderBy` | `created` / `overall` / `rounds` / `tool_calls` |
 | `ascending` | `1` 为升序，默认降序 |
 
-响应除 `records` 外还带 `total`（全量条数，不受 `limit` 影响）：
+响应除 `records` 外还带 `total`（**符合当前筛选条件**的条数，不受 `limit`/`offset` 影响）：
 
 ```json
 { "ok": true, "records": [ … ], "total": 1284 }
 ```
+
+`total` 与 `records` 来自同一个筛选集合。管理台据此算页数；若 `total` 是全表条数，
+筛选后会显示大量空页，且没有任何报错。`tests/eval-records.test.ts` 对此有回归。
 
 **注意**：`records` 的 `{id}` 可能含冒号（如 `ai:analysis:kalkLqQ`），
 **必须做 URL 编码**。服务端会先解码再匹配；不编码时路由可能无法命中。
@@ -510,7 +613,7 @@ Authorization: Bearer <ADMIN_TOKEN>
 
 ## 附：SSE 客户端实现要点
 
-自己写前端时，这几处最容易出错（都有对应实测）：
+客户端实现这几处最容易出错（都有对应实测）：
 
 **一、必须保留跨块的残余。** 一个帧常被 TCP 切成两块，按 `\n\n` 切分后要把不完整的尾部留在缓冲区。
 
@@ -523,7 +626,7 @@ Authorization: Bearer <ADMIN_TOKEN>
 
 **五、先检查 `content-type`。** 推流前失败返回的是 JSON，直接按流解析会得到空结果。
 
-参考实现（`web/` 已移除，逻辑仍适用）：
+参考实现（`web/src/lib/sse.ts`，已由 `web/tests/sse.test.ts` 覆盖）：
 
 ```ts
 const res = await fetch('/v1/chat', { method: 'POST', headers: {...}, body: JSON.stringify(req) })

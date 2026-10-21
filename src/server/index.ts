@@ -6,9 +6,10 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import { describeConfig, isDev, security, defaultProvider, agent as agentCfg } from '../config.ts';
+import { describeConfig, isDev, security, defaultProvider, logshare, agent as agentCfg } from '../config.ts';
 import { SseWriter } from './sse.ts';
 import { resolveClientIp } from '../security/clientIp.ts';
+import { SsrfError, normalizeBaseUrl, validateProviderUrl } from '../security/ssrf.ts';
 import { runAgent } from '../agent/runner.ts';
 import { createToolContext } from '../agent/tools/index.ts';
 import { listTopics, stats as ragStats } from '../rag/search.ts';
@@ -41,14 +42,16 @@ import {
 } from '../knowledge/domain.ts';
 import { adminActor, checkAdmin } from '../security/adminAuth.ts';
 import { serveWeb } from './static.ts';
+import { compress } from './compress.ts';
 import {
   analysisStats,
-  countAnalysisRecords,
+  countAnalysisRecordsMatching,
   getAnalysisRecord,
   listAnalysisRecords,
   purgeAnalysisRecords,
   saveAnalysisRecord,
 } from '../eval/records.ts';
+import type { RecordFilter } from '../eval/records.ts';
 import { getDb } from '../store/db.ts';
 import { extractConclusion } from '../agent/structured.ts';
 
@@ -104,14 +107,25 @@ async function readBody(req: IncomingMessage): Promise<string> {
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(body),
+  const contentType = 'application/json; charset=utf-8';
+
+  // 压缩（`/v1/log/{id}` 单次可达 265KB，移动端不压很浪费）
+  const packed = compress(body, res.req?.headers['accept-encoding'] as string | undefined, contentType);
+
+  const headers: Record<string, string | number> = {
+    'content-type': contentType,
+    'content-length': packed === null ? Buffer.byteLength(body) : packed.body.byteLength,
     'access-control-allow-origin': '*',
     'access-control-allow-headers': '*',
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  });
-  res.end(body);
+  };
+  if (packed !== null) {
+    headers['content-encoding'] = packed.encoding;
+    // 同一 URL 依 Accept-Encoding 返回不同字节，必须声明
+    headers['vary'] = 'accept-encoding';
+  }
+  res.writeHead(status, headers);
+  res.end(packed === null ? body : packed.body);
 }
 
 /** 健康检查 */
@@ -174,13 +188,16 @@ function countLinesOf(text: string): number {
  *  - **每份截断到 2MB、总量 6MB**：截断时明确回报 `truncated` 与 `omitted`，
  *    界面据此说明「面板只显示前 2MB」，而不是悄悄少几行让用户以为日志就这么长。
  */
-async function handleLog(res: ServerResponse, logId: string): Promise<void> {
+async function handleLog(res: ServerResponse, logId: string, refresh = false): Promise<void> {
   if (!isValidLogId(logId)) {
     json(res, 400, { ok: false, error: '日志 ID 格式非法' });
     return;
   }
 
-  const cached = logCache.get(logId);
+  // `refresh=1` 跳过缓存：刚上传的日志可能仍在异步反混淆，界面上的「刷新」
+  // 必须真的回到上游读一次，否则用户会一直看到同一份未反混淆的正文，
+  // 而界面还显示「反混淆处理中」——看起来像刷新按钮坏了。
+  const cached = refresh ? undefined : logCache.get(logId);
   if (cached !== undefined && Date.now() - cached.at < LOG_CACHE_TTL_MS) {
     json(res, 200, cached.payload);
     return;
@@ -262,6 +279,8 @@ function handleSession(res: ServerResponse, sessionId: string): void {
     role: m.role,
     content: m.content,
     ...(m.reasoning !== null && m.reasoning !== '' ? { reasoning: m.reasoning } : {}),
+    ...(m.score !== null ? { score: m.score } : {}),
+    ...(m.meta !== null ? { meta: m.meta } : {}),
     createdAt: m.createdAt,
   }));
 
@@ -306,10 +325,17 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     trustedProxies: security.trustedProxies,
   });
 
+  // 匿名主体（指纹优先、IP+UA 兜底）。
+  //
+  // 必须在会话解析**之前**算出来：会话自动复用要限定在同一主体内。
+  // 日志 ID 是公开的（就在 URL 里），若只按 logId 复用，任何打开同一份日志的
+  // 人都会进入同一个会话——看到彼此的追问、共享轮次额度。
+  const anonId = anonymousId(clientIp, String(req.headers['user-agent'] ?? ''), body.fingerprint);
+
   // ── 会话解析（三重优先级）─────────────────────────────
   //
-  //  1. 客户端显式传入的 `sessionId`（多轮延续）
-  //  2. 按 `logId` 查找未过期会话（同一日志不重复建会话）
+  //  1. 客户端显式传入的 `sessionId`（多轮延续 / 换设备回放）
+  //  2. 按 `logId` 查找**同一匿名主体**的未过期会话（同一日志不重复建会话）
   //  3. 新建
   //
   // 实测缺陷（2026-10-17 修复）：此前 `body.sessionId` 只作为响应字段回传，
@@ -321,8 +347,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   let session = providedSessionId !== '' ? getSession(providedSessionId) : null;
   if (session === null) {
-    // 未传或已过期：按 logId 复用/新建
-    session = findOrCreateSession(logId, sessionTtlSeconds(logId));
+    // 未传或已过期：在**同一主体内**按 logId 复用/新建。
+    // 显式 sessionId 走的是 bearer 语义（知道 ID 即可回放），这是无登录产品
+    // 支持「换设备继续」的必要取舍；但自动复用不能跨人。
+    session = findOrCreateSession(logId, sessionTtlSeconds(logId), anonId);
   }
 
   // 会话已绑定的日志优先——客户端延续会话时可省略 logId，
@@ -348,36 +376,33 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   }));
 
   // 记录用户消息
+  //
+  // 注意：这里保持「前置检查之前落库」的既有语义。它与「失败不留痕」的直觉相反，
+  // 但 tests/server.test.ts 明确覆盖了该行为：显式 sessionId 的请求即使因
+  // 日志取不到而 404，用户消息仍要落到该会话（保证客户端重试时上下文连续）。
+  // 若要改成「失败不留痕」，必须同时改掉那条测试与轮次口径，不能只改一处。
   appendMessage(session.id, 'user', body.message);
 
   // 日志正文来源判定：显式正文优先；只给 ID 时稍后自动取回
   const providedContent =
     typeof body.logContent === 'string' && body.logContent.trim() !== '' ? body.logContent : null;
 
-  // 配额检查（按成本分级：带日志 > 纯对话）
+  // ── 供应商解析与校验（必须早于配额）────────────────────
   //
-  // 超配额不硬拒，而是降级为「快速模式」（提示词层面约束工具使用），
-  // 避免 CGNAT 场景下误伤真实用户（项目自身已有此教训）。
+  // 顺序理由：供应商地址非法是**配置问题，不是一次分析**。若先扣配额再返回
+  // 400/503，用户填错一次端点就白掉一次额度，而界面显示的是「分析失败」——
+  // 排查方向会被引到额度上。
   //
-  // 配额种类只依据「客户端是否指向一份日志」（正文或 ID），不等取回结果——
-  // 取回发生在配额之后，避免「取日志」这一动作本身不被计数。
-  const quotaKind: QuotaKind = providedContent !== null || effectiveLogId !== null ? 'logId' : 'chat';
-  const anonId = anonymousId(clientIp, String(req.headers['user-agent'] ?? ''), body.fingerprint);
-  const quota = await consume(quotaKind, anonId, clientIp);
-
-  if (isDev) {
-    console.log(
-      `[quota] kind=${quotaKind} remaining=${quota.remaining}/${quota.limit} allowed=${quota.allowed}`,
-    );
-  }
-
-  // 供应商：用户自定义优先，否则服务端默认
+  // 自定义供应商是**公网用户输入**，服务端要拿它发起请求，因此必须过 SSRF
+  // 校验（`validateProviderUrl` 每次请求都重新解析，防 DNS Rebinding）。
+  // 服务端默认供应商来自运维配置，属可信来源，不做此校验——否则本机自建模型
+  // （127.0.0.1）在未开 ALLOW_LOOPBACK_PROVIDER 时会被自己的配置挡掉。
   const provider =
     body.provider !== undefined
       ? {
-          baseUrl: body.provider.baseUrl,
-          apiKey: body.provider.apiKey,
-          model: body.provider.model,
+          baseUrl: normalizeBaseUrl(String(body.provider.baseUrl ?? '')),
+          apiKey: String(body.provider.apiKey ?? ''),
+          model: String(body.provider.model ?? '').trim(),
         }
       : {
           baseUrl: defaultProvider.baseUrl,
@@ -391,6 +416,34 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       error: '未配置模型供应商。请在设置中填写，或联系管理员配置服务端默认供应商。',
     });
     return;
+  }
+
+  if (body.provider !== undefined) {
+    try {
+      await validateProviderUrl(provider.baseUrl, { allowLoopback: security.allowLoopbackProvider });
+    } catch (e) {
+      if (e instanceof SsrfError) {
+        json(res, 400, { ok: false, error: `自定义供应商地址不可用：${e.message}` });
+        return;
+      }
+      throw e;
+    }
+  }
+
+  // 配额检查（按成本分级：带日志 > 纯对话）
+  //
+  // 超配额不硬拒，而是降级为「快速模式」（提示词层面约束工具使用），
+  // 避免 CGNAT 场景下误伤真实用户（项目自身已有此教训）。
+  //
+  // 配额种类只依据「客户端是否指向一份日志」（正文或 ID），不等取回结果——
+  // 取回发生在配额之后，避免「取日志」这一动作本身不被计数。
+  const quotaKind: QuotaKind = providedContent !== null || effectiveLogId !== null ? 'logId' : 'chat';
+  const quota = await consume(quotaKind, anonId, clientIp);
+
+  if (isDev) {
+    console.log(
+      `[quota] kind=${quotaKind} remaining=${quota.remaining}/${quota.limit} allowed=${quota.allowed}`,
+    );
   }
 
   // ── 日志正文获取 ──────────────────────────────────────
@@ -492,8 +545,37 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
 
     if (result.ok) {
-      // 记录助手回复（含思维链，供后续轮次与回溯）
-      appendMessage(session.id, 'assistant', result.content, result.reasoning);
+      // 自评摘要：与 done 帧下发的字段**保持同一形状**，回放时可直接复用。
+      // 评分失败（result.score === undefined）时为 undefined，不写空壳。
+      const scoreSummary =
+        result.score !== undefined
+          ? {
+              overall: result.score.overall,
+              deliverable: result.score.deliverable,
+              dimensions: {
+                grounding: result.score.dimensions.grounding.score,
+                verification: result.score.dimensions.verification.score ?? 0,
+                actionability: result.score.dimensions.actionability.score ?? 0,
+                economy: result.score.dimensions.economy.score ?? 0,
+              },
+              deductions: result.score.deductions.slice(0, 5),
+              missingAnchors: result.score.groundingDetail.anchors.missing.slice(0, 8).map((a) => a.text),
+            }
+          : undefined;
+
+      // 追问要落库：它是**用户需要回答的东西**，只存在于流里的话刷新后就答不了了。
+      const messageMeta =
+        result.asks.length > 0 ? { asks: result.asks } : undefined;
+
+      // 记录助手回复（含思维链、自评与结构化附加信息，供后续轮次与回溯）
+      appendMessage(
+        session.id,
+        'assistant',
+        result.content,
+        result.reasoning,
+        scoreSummary,
+        messageMeta,
+      );
 
       // 落分析记录 + 看板数据。
       // 记录失败绝不能影响用户拿到答案——它是观测，不是交付路径。
@@ -520,23 +602,13 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         sessionId: session.id,
         remaining: quota.remaining,
         ...(quota.nearLimit ? { nearLimit: true } : {}),
+        ...(result.asks.length > 0 ? { asks: result.asks } : {}),
         // 自评随 done 帧下发：前端可以直接呈现「哪些引用没在日志里找到」，
         // 而不是只给一个分数。
         ...(result.score !== undefined
           ? {
               score: {
-                overall: result.score.overall,
-                deliverable: result.score.deliverable,
-                dimensions: {
-                  grounding: result.score.dimensions.grounding.score,
-                  verification: result.score.dimensions.verification.score,
-                  actionability: result.score.dimensions.actionability.score,
-                  economy: result.score.dimensions.economy.score,
-                },
-                deductions: result.score.deductions.slice(0, 5),
-                missingAnchors: result.score.groundingDetail.anchors.missing
-                  .slice(0, 8)
-                  .map((a) => a.text),
+                ...scoreSummary,
                 ...(recordId !== null ? { recordId } : {}),
               },
             }
@@ -602,6 +674,18 @@ async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<
     return;
   }
 
+  // 能力检查在配额之前：未配置 LogShare 属于**部署问题**，不该先消耗用户当天的
+  // 上传次数——否则管理员配好之前，每次试探都白掉一次额度。
+  if (!logshare.canUpload) {
+    json(res, 503, {
+      ok: false,
+      error:
+        '未配置 LogShare 上传能力（LOGSHARE_INTERNAL_URL 与 LOGSHARE_PUBLIC_API_URL 均为空）。' +
+        '日志必须经 LogShare 完整写入流水线处理，本服务不自行落盘。',
+    });
+    return;
+  }
+
   // 配额先于校验：校验本身要遍历整份内容，不能让超配额请求白蹭这次遍历。
   const fingerprint =
     raw !== null && typeof raw === 'object' && typeof (raw as { fingerprint?: unknown }).fingerprint === 'string'
@@ -650,8 +734,11 @@ async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<
 
   json(res, 200, {
     ok: true,
-    id: uploaded.id,
-    // 删除令牌只在此处下发一次（LogShare 存的是哈希），前端需自行保管
+    // 字段名与 API.md 对齐：`logId` 比裸 `id` 更明确（上传响应里还有 token 等其它 ID）。
+    // 历史上这里返回 `id`，而文档与前端都按 `logId` 读取，导致上传成功后跳到
+    // `/undefined`——契约漂移的典型后果，故在服务端这一侧收敛。
+    logId: uploaded.id,
+    maybeObfuscating: true,
     ...(uploaded.token !== undefined ? { token: uploaded.token } : {}),
     ...(validated.notes.length > 0 ? { notes: validated.notes } : {}),
     remaining: quota.remaining,
@@ -932,20 +1019,30 @@ async function handleRecords(
         ? orderByRaw
         : undefined;
 
-    const recordsList = listAnalysisRecords({
+    // 筛选条件只构造一次：列表与 `total` 必须来自同一个集合，
+    // 否则「筛选后共 3 条」仍会显示 20 页，翻页后全是空页。
+    const filter: RecordFilter = {
       minScore: num('minScore'),
       maxScore: num('maxScore'),
       ...(deliverableRaw === '1' ? { deliverable: true } : {}),
       ...(deliverableRaw === '0' ? { deliverable: false } : {}),
       logId: url.searchParams.get('logId') ?? undefined,
       model: url.searchParams.get('model') ?? undefined,
-      limit: num('limit'),
-      offset: num('offset'),
       ...(orderBy !== undefined ? { orderBy } : {}),
       ascending: url.searchParams.get('ascending') === '1',
+    };
+
+    const recordsList = listAnalysisRecords({
+      ...filter,
+      limit: num('limit'),
+      offset: num('offset'),
     });
 
-    json(res, 200, { ok: true, records: recordsList, total: countAnalysisRecords() });
+    json(res, 200, {
+      ok: true,
+      records: recordsList,
+      total: countAnalysisRecordsMatching(filter),
+    });
     return;
   }
 
@@ -1076,7 +1173,7 @@ export function createHttpServer(): Server {
             json(res, 400, { ok: false, error: '日志 ID 编码非法' });
             return;
           }
-          await handleLog(res, logId);
+          await handleLog(res, logId, url.searchParams.get('refresh') === '1');
           return;
         }
 
