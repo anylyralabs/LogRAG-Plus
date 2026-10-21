@@ -88,9 +88,13 @@ src/
 │       ├── structured.ts    结尾结构化 JSON 解析
 │       └── tools/           工具集（log / rag / github / knowledge）
 
-前端                        **不在本仓库**（另行开发）。后端保留静态托管能力：
-                            产物放哪由 WEB_DIR 指定，未配置时服务为纯 API，
-                            `/logshare/*` 落普通 404，`/v1/*` 不受影响。
+前端 `web/`              Vue 3 + Vite 案卷式 Agent 工作台（详见 web/README.md）
+├── public/landing.html   官网首页（/ 静态托管，不经 Vue）
+├── src/pages/             Workspace / Admin / NotFound（应用首页即 Workspace）
+├── src/components/        layout / entry / chat / report / log / settings / admin
+├── src/lib/               api / sse / markdown / logdoc / structured / upload
+├── src/stores/            chat / log / settings / health / history / admin
+└── tests/                 SSE / Markdown XSS / 日志解析 / 上传 / 组件 / 对比度 / 路径
 
 knowledge/                 RAG 知识库（领域知识，回答「这是什么、怎么修」）
 ├── patterns/              单签名 → 单故障的判据卡
@@ -302,16 +306,29 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 `./data/rag/index.db` → 构建报告「完成」、检索返回「不可用」，**两边各自都正常**。
 默认值已改为与构建输出一致。
 
-### 10. 前端不在本仓库，但接口契约在这里
+### 10. 前端在 `web/`，接口契约仍是唯一依据
 
-前端由用户另行开发。本仓库的责任是**把接口说清楚**，见 `API.md`。
+前端是仓库内的 `web/`（Vue 3 + Vite），由本服务的静态托管层挂在 `/logshare/`。
+但**接口契约与前端实现分离**这条原则不变：`API.md` 是唯一依据，前端不得靠读后端源码猜字段。
 
 - `API.md` 是唯一契约：路由、字段、SSE 帧格式、错误码、管理接口三态、客户端实现要点。
 - `tests/api-doc.test.ts` 双向守门：文档写了但代码没有 → 报错；代码有但文档没写 → 也报错。
   这条比格式检查值钱——**新增接口忘了写文档是最常见的漂移方向**。
-- 后端保留静态托管（`src/server/static.ts`）：前端产物可用 `WEB_DIR` 挂到 `/logshare/`。
-  未配置或无产物时整体跳过，服务退化为纯 API。托管层的规则与前端框架无关，
-  因此保留：只有资源目录读盘、文件名限单段白名单、其余路径回退入口页。
+- `tests/api-contract.test.ts` 守**字段级**契约：只校验路由存在拦不住「上传返回 `id`
+  而文档写 `logId`」这类漂移（两边各自都正常，前端拿到 `undefined` 继续跑）。
+- 前端测试在 `web/tests/`（Vitest），与后端 `tests/*.test.ts`（node:test）分开跑。
+
+前端的两条安全不变量由静态扫描守住：
+- **禁止 `v-html` / `innerHTML` / `eval` / `marked.parse`**（`web/tests/security.test.ts`）；
+- **禁止网络字体与远程图片**，避免离线构建失败与阅读者 IP 泄漏。
+
+**页面分工（不可合并）**：
+- `/` 是官网首页，`web/public/landing.html` 静态托管，不经 Vue —— 第一次来的人
+  先看「这是什么」。文件缺失时回退为重定向到 `/logshare/`。
+- `/logshare/` 是应用首页，**打开即聊天**。日志是可选附件，不是入场券：
+  「输入编号 / 上传 / 粘贴」三件套已从首屏移除，收进输入区。
+- 追问（`ask_user`）必须可恢复：`status` 帧 `type=ask` → `done.asks` → 消息
+  `meta.asks` 落库三级通道；「已回答」由**其后是否出现用户消息**判定，不设额外状态。
 
 ## 环境适配（踩坑记录）
 
@@ -425,7 +442,7 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（31 个文件 335 项）
+npm test                    # 全部单元测试（32 个文件 369 项）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
 bash scripts/restart.sh     # 重启服务（等端口释放 + 等 READY + 校验 /health，不靠 sleep 猜）
@@ -442,8 +459,17 @@ python3 scripts/analyze_scores.py   # 生产语料评分复核（读 data/corpus
 每个测试文件独立进程，因此可以在文件顶部直接设 `process.env`
 （`tests/path-bases.test.ts` 就用这个特性验证默认路径）。
 
-**本仓库不含前端，服务以纯 API 形态运行**：`/logshare/*` 落普通 404，
-`/v1/*` 不受影响。启动日志会打印「前端页面: 未布置」，这是预期状态，不是故障。
+**前端构建产物由本服务托管**：`npm run build:all` 会先构建前端（`web/dist`）再编译后端；
+或分开执行 `cd web && npm run build` 与 `npm run build`，然后 `npm start`，访问 `/logshare/`。
+未构建时 `/logshare/*` 落普通 404，`/v1/*` 不受影响；启动日志会打印「前端页面: 未布置」，
+此时是预期状态，不是故障。
+
+**前端测试与后端测试是两套**：
+```bash
+npm test              # 后端 node:test（tests/*.test.ts）
+npm run web:test      # 前端 vitest（web/tests/*.test.ts）
+npm run web:typecheck # vue-tsc
+```
 
 **知识库改动后必须重建索引**，否则新条目检索不到（`rag_search` 返回「索引不可用」
 或命中旧分块）。重建前先确认没有子代理在写 `knowledge/`

@@ -306,9 +306,13 @@ Pojav 系启动器共用一套渲染器与运行时注入协议，`Env Map` 段�
 
 该标记出现即证明游戏进程已经启动过，问题在游戏层而非 JVM 创建阶段。
 
-## 修复步骤
+## 日志字段与流程阶段的对照
 
-**按 `Summarize:` / `exit code` 与字段判定**
+**按 `Summarize:` / `exit code` 与字段定位「卡在哪一步」**
+
+这不是修复步骤——它只回答「日志里的某个字段意味着流程走到了哪里」。
+具体故障的判据在 `patterns/` 对应条目（设备与虚拟化层见
+`patterns/system-environment-failure.md`，渲染器见 `ecosystem/renderer-compat.md`）。
 
 | 现象或字段 | 该阶段的输入 |
 |---|---|

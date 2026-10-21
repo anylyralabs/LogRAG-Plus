@@ -2,6 +2,10 @@
 
 ## 签名 (Signature)
 
+本节的签名**只收启动器自身产生**的报错（JVM 参数装配、实例启动、启动器自己的下载与更新）。
+游戏侧与模组侧的通用报错（`UnsupportedClassVersionError`、`OutOfMemoryError`、
+`NoSuchMethodError` 等）判据在 `patterns/` 对应条目，这里只看「启动器把 JVM 装错了」这一类。
+
 ```
 Error: Could not create the Java Virtual Machine.
 Error: A fatal exception has occurred. Program will exit.
@@ -9,11 +13,6 @@ Unrecognized option: --add-opens
 Error: Unable to access jarfile HMCL.jar
 Error: could not open `C:\Program Files\Java\jre1.8.0_411\lib\amd64\jvm.cfg'
 
-java.lang.UnsupportedClassVersionError: net/minecraft/client/main/Main has been compiled by a
-    more recent version of the Java Runtime (class file version 65.0), this version of the
-    Java Runtime only recognizes class file versions up to 61.0
-
-java.lang.OutOfMemoryError: Java heap space
 Failed to create JVM: error code -1
 JVM Path: C:\Program Files\Java\jre1.8.0_411\bin\server\jvm.dll
 Invalid maximum heap size: -Xmx128m

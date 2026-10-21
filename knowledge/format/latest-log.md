@@ -83,58 +83,29 @@ Forge / NeoForge 的同一位置另带日志器名：
 | `Backend library: LWJGL` 缺失 | 从未创建图形上下文，属启动器/原生库层 |
 | 已有 `Sound engine started` 后崩溃 | 已进入可玩状态，属运行期问题 |
 
-### 高频启动失败签名
+### 启动失败时该去哪一节看
 
-```
-java.lang.UnsupportedClassVersionError: net/minecraft/client/main/Main has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 61.0
-```
-Java 主版本低于游戏要求。两个数字分别是要求值与当前值。
+这一节**只做指路，不写判据**。原因很实际：这里若逐条抄下完整报错原文，
+检索时它会被当成「故障判据」排到真正的故障条目前面（实测过：某类报错的首条结果
+曾是本文，而正确答案在 `patterns/` 里对应条目）。格式文档的职责是
+「日志长什么样」，不是「这个错怎么修」。
 
-```
-[main/ERROR]: Failed to create mod instance
-java.lang.RuntimeException: Could not execute entrypoint stage 'main'/'client' due to errors, provided by '<模组id>' at '<入口类>'
-```
-模组入口类构造失败，肇事模组由 `provided by` 后的 id 直接给出。
+| 你在日志里看到 | 去这里看判据 |
+|---|---|
+| `UnsupportedClassVersionError` / `class file version NN.0` | `patterns/version-mismatch.md` |
+| `Failed to create mod instance` / `Could not execute entrypoint stage` | `patterns/fabric-loader-failure.md`、`patterns/forge-early-loading-failure.md` |
+| `Missing or unsupported mandatory dependencies` / `Incompatible mods found` | `patterns/mod-dependency-failure.md` |
+| `Duplicate mods found` / `Mods share ID with builtin mod` | `patterns/mod-conflict.md` |
+| `is missing mods.toml` / `invalid LOC header` / `zip END header not found` | `patterns/mod-jar-corruption.md` |
+| `Reference map ... could not be read` | `patterns/mixin-refmap-failure.md` |
+| `Cowardly refusing to send event ... broken mod state` | `patterns/mod-config-timing-failure.md` |
+| `module.FindException` / `Modules export package` | `patterns/version-mismatch.md` |
+| `ZipException: zip END header not found` | `patterns/mod-jar-corruption.md` |
+| `InvalidPathException` / 路径含中文冒号 | `patterns/path-encoding-failure.md` |
+| `SIGILL` / `Problematic frame` | `patterns/native-lib-abi-mismatch.md`、`format/hs-err.md` |
 
-```
-Missing or unsupported mandatory dependencies:
-	Mod ID: 'fabric-api', Requested by: 'jei', Expected range: '[0.139.0+1.21.11,)', Actual version: '[MISSING]'
-```
-依赖求解失败，游戏主类未加载。
-
-```
-[main/WARN]: Mod resolution failed
-[main/ERROR]: Incompatible mods found!
-```
-Fabric 依赖求解失败的另一入口标记。
-
-```
-Duplicate mods found: xxx
-Mods share ID with builtin mod <内置ID>
-```
-同一模组存在多个副本，或模组 id 与内置 id 冲突。
-
-```
-Mod file <文件名>.jar is missing mods.toml          ← Forge/NeoForge
-Mod file <文件名>.jar is not a valid mod file        ← Fabric
-java.util.zip.ZipException: invalid LOC header (bad signature)
-```
-jar 不是该加载器的模组、或文件损坏。
-
-```
-[main/WARN]: Reference map '<模组>-refmap.json' for <模组>.mixins.json could not be read. If this is a development environment you can ignore this message
-```
-基准映射缺失，属开发环境残留物，通常无害。
-
-```
-[Render thread/ERROR]: Cowardly refusing to send event <事件类> to a broken mod state
-```
-某个模组进入损坏状态后，Forge/NeoForge 拒绝继续向它投递事件。该模组随后注册的内容全部缺失，是"模组装了却无效果"的典型来源。
-
-```
-java.lang.module.FindException: Module xxx not found, required by yyy
-```
-模块路径配置错误，多见于启动至 Java 9+ 的模块化环境。
+**判断原则**：日志里出现某个异常名时，判据在 `patterns/`，
+本文只负责告诉你「这个名字属于哪一类、该去看哪一节」。
 
 ### latest.log 与 debug.log 的差异
 
@@ -176,13 +147,17 @@ Missing sound for event: minecraft:item.goat_horn.play
 3. 最后一行是普通 INFO 而进程消失 → 转看 `crash-reports/` 或 `hs_err_pid*`。
 4. 最后一行含 `Stopping!` / `Stopping server` → 正常关闭，不是崩溃。
 
-**按错误签名归因**
+**从日志里提取「定位用的坐标」**
 
-1. `UnsupportedClassVersionError` → 读两个 `class file version` 数字，前者是要求、后者是当前；切换 Java 到要求版本。
-2. `provided by '<模组id>'` 或 `Requested by: '<模组id>'` → 该 id 即肇事模组，直接定位。
-3. `Duplicate mods found` / `Mods share ID with builtin mod` → 清点模组目录中的重复 jar。
-4. `is not a valid mod file` / `invalid LOC header` → 该 jar 属于另一种加载器或下载损坏，检查文件大小。
-5. `Cowardly refusing to send event ... to a broken mod state` → 向上回溯日志找该模组**首次**进入损坏状态的位置，那才是根因，本条只是后果。
+判据本身在 `patterns/`，这里只讲**怎么从日志里挖出足以定位的信息**：
+
+1. `<类>(<文件名>:<行号>)` 形式的堆栈帧 → 文件名与行号是报告给模组作者的硬证据，
+   也是判断「哪个 jar」的起点。
+2. `provided by '<模组id>'` / `Requested by: '<模组id>'` → 该 id 就是肇事模组，
+   不需要再去猜 jar 名。
+3. `Reloading ResourceManager` 之前的最后一行 INFO → 卡死点就在这一行之后，
+   而不是「日志的最后一句话」。
+4. 同名异常出现多次时，**取时间戳最早的那一次**——后续多为连锁反应。
 
 **利用 debug.log 缩小混入冲突范围**
 
