@@ -77,6 +77,14 @@ export interface RunResult {
   /** 完整思维链 */
   reasoning: string;
   /**
+   * 本轮模型发起的反问（`ask_user` 工具调用）。
+   *
+   * 为什么要在结果里单独带出来：追问是**用户需要回答的东西**。只存在于
+   * 工具调用记录或正文里，前端无法稳定地把它渲染成交互块，刷新后更是丢失。
+   * 这里收集结构化的问题清单，随消息落库。
+   */
+  asks: Array<{ questions: string[]; reason?: string }>;
+  /**
    * 工具调用记录。
    *
    * `result` 保留**较完整的原文**（上限 100KB/次）而非仅用于展示的摘要——
@@ -146,6 +154,8 @@ function mergeRuns(first: RunResult, final: RunResult): RunResult {
   return {
     ...final,
     reasoning: first.reasoning + final.reasoning,
+    // 收尾轮不调用工具，追问只可能来自主循环
+    asks: first.asks,
     toolCalls: [...first.toolCalls, ...final.toolCalls],
     rounds: first.rounds + final.rounds,
     hitLimit: true,
@@ -225,7 +235,7 @@ async function runSynthesis(options: RunOptions, prev: RunResult): Promise<RunRe
     if (reasoningTail !== '') sse.thinking(reasoningTail);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, content, reasoning, toolCalls: [], rounds: 0, hitLimit: false, error: msg };
+    return { ok: false, content, reasoning, asks: [], toolCalls: [], rounds: 0, hitLimit: false, error: msg };
   }
 
   // 收尾轮仍无正文时不要伪装成功——一份「23 分的空答案」比一句「请重试」
@@ -235,6 +245,7 @@ async function runSynthesis(options: RunOptions, prev: RunResult): Promise<RunRe
       ok: false,
       content,
       reasoning,
+      asks: [],
       toolCalls: [],
       rounds: 0,
       hitLimit: false,
@@ -242,7 +253,7 @@ async function runSynthesis(options: RunOptions, prev: RunResult): Promise<RunRe
     };
   }
 
-  return { ok: true, content, reasoning, toolCalls: [], rounds: 0, hitLimit: false };
+  return { ok: true, content, reasoning, asks: [], toolCalls: [], rounds: 0, hitLimit: false };
 }
 
 /** 收尾轮里回灌给模型的工具证据总量上限（字符） */
@@ -316,6 +327,11 @@ function buildSynthesisMessage(options: RunOptions, prev: RunResult): string {
  * 没有评分用户照样能拿到答案。
  */
 function withScore(result: RunResult, options: RunOptions): RunResult {
+  // 追问轮不评分：这一轮没有结论，拿「结论的证据落地性」去打分必然得低分
+  // （实测追问轮曾因此拿到 56 分 + deliverable:false，而它其实完全正常）。
+  // 追问的产出是问题，不是可评分的答案。
+  if (result.asks.length > 0) return result;
+
   try {
     result.score = scoreAnalysis({
       answer: result.content,
@@ -399,11 +415,23 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
   let content = '';
   let reasoning = '';
   const toolCalls: RunResult['toolCalls'] = [];
+  /** 本轮 `ask_user` 提出的问题（结构化，供落库与回放） */
+  const asks: RunResult['asks'] = [];
   let hitLimit = false;
   /** 是否因「原地打转」而非轮次耗尽而中止（两者共用收尾路径，但日志要分得清） */
   let spinDetected = false;
   /** 模型是否把工具调用写成了正文（生产语料 29 条，见 sanitize.ts） */
   let toolCallAsText = false;
+  /**
+   * 已向用户提问，本轮进入「只许收尾」状态。
+   *
+   * 为什么需要这个状态（实测缺陷）：`ask_user` 之后模型常会**继续自检**
+   * ——再 grep 一次、再读一段，然后才产出正文。但界面上问题已经呈现给用户、
+   * 用户正在等回答，而模型还在后台查东西：既浪费配额，也让「反问」这件事
+   * 显得不果断。问题问出去之后，本轮唯一该做的事是把问题与理由写进正文，
+   * 而不是继续验证。
+   */
+  let awaitingUser = false;
 
   /**
    * 工具调用跟踪器（见 `tool-tracker.ts`）。
@@ -478,6 +506,22 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
         const truncated = rawContent.length > SUMMARY_MAX;
         sse.toolResult(name, summarize(rawContent), truncated);
 
+        // 反问：从调用参数里取出问题清单。
+        //
+        // 工具的返回文本是给模型看的说明书，不是给前端解析的协议；
+        // 结构化数据在**参数**里，这里直接取，避免前端正则解析中文提示。
+        if (name === 'ask_user') {
+          const args = matched?.name === name ? matched.args : undefined;
+          const parsed = extractAsk(args);
+          if (parsed !== null) {
+            asks.push(parsed);
+            sse.ask(parsed.questions, parsed.reason);
+            // 进入「只许收尾」：下一轮模型若再发工具调用，直接终止并补一次收尾，
+            // 而不是让它继续自检（见 awaitingUser 的注释）
+            awaitingUser = true;
+          }
+        }
+
         toolCalls.push({
           round: tracker.count,
           name,
@@ -519,6 +563,16 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
         (msg as { tool_calls?: FullCallInput[] }).tool_calls,
       );
       for (const a of announced) emitTool(a);
+
+      // 已经问过用户，模型却还要调工具：说明它想继续自检。
+      // 这里不再执行，直接结束主循环——问题已经呈现给用户，继续查只是在拖延回答。
+      if (awaitingUser && announced.length > 0) {
+        sse.status({
+          type: 'reflection',
+          message: '已向你提问，先等你的回答；不再继续检索。',
+        });
+        break;
+      }
 
       // 原地打转检测（依据：生产语料 255 条低分记录是「轮次 ≥10 且效率分 0」，
       // 典型如 `fw79h8D` 97 轮 / 96 次工具调用仍停在 78 分）。
@@ -579,8 +633,23 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
     // （只清掉假调用就交付，会让用户拿到一段空白——那 29 条生产记录正是如此）
     if (toolCallAsText) hitLimit = true;
 
+    // 已提问但模型没写出正文：把问题清单本身作为正文。
+    // 否则用户只看到一句错误，而问题其实已经随 ask 帧发出去了——两边对不上。
+    if (awaitingUser && content.trim() === '' && asks.length > 0) {
+      // 兜底正文**不复述问题**：问题已随 ask 帧结构化下发，界面会渲染成输入框。
+      // 正文只交代「为什么问」——这正是 ask 帧里没有的信息，不重复。
+      const reason = asks.map((a) => a.reason ?? '').find((r) => r !== '') ?? ''
+      content =
+        reason !== ''
+          ? `需要补充一些日志里没有的信息才能继续判断：${reason}`
+          : '需要补充一些日志里没有的信息才能继续判断，问题见上方。'
+      sse.content(content)
+    }
+
     if (content.trim() === '' || toolCallAsText) {
-      const msg = toolCallAsText
+      const msg = awaitingUser
+        ? '已向你提问，请先回答上面的问题。'
+        : toolCallAsText
         ? '模型把工具调用写成了正文（未真正执行），本轮无有效结论。'
         : spinDetected
         ? '模型在重复同一次检索，已中止并转入结论整理。'
@@ -593,6 +662,7 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
         ok: false,
         content,
         reasoning,
+        asks,
         toolCalls,
         rounds: tracker.count,
         hitLimit,
@@ -606,6 +676,7 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
       ok: true,
       content,
       reasoning,
+      asks,
       toolCalls,
       rounds: tracker.count,
       hitLimit,
@@ -614,13 +685,37 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, content, reasoning, toolCalls, rounds: tracker.count, hitLimit, error: msg };
+    return { ok: false, content, reasoning, asks, toolCalls, rounds: tracker.count, hitLimit, error: msg };
   } finally {
     // 撞顶 `break`、客户端断开、抛错——三条路径都要让底层图当场停下，
     // 否则它会继续把工具跑完、再发一次没人消费的模型请求（见上面实测序列）。
     // 正常跑完时这只是一次空操作。
     innerAbort.abort();
   }
+}
+
+/**
+ * 从 `ask_user` 的调用参数里取出问题清单。
+ *
+ * 模型偶尔会把 `questions` 写成字符串而不是数组；两种都接受，
+ * 但仍要求至少有一个非空问题，否则当作「没有提问」——空数组会让界面
+ * 渲染一个没有内容的追问块。
+ */
+function extractAsk(args: unknown): { questions: string[]; reason?: string } | null {
+  if (args === null || typeof args !== 'object') return null;
+  const rec = args as { questions?: unknown; reason?: unknown };
+
+  const raw = rec.questions;
+  const list = Array.isArray(raw)
+    ? raw.filter((q): q is string => typeof q === 'string')
+    : typeof raw === 'string'
+      ? [raw]
+      : [];
+  const questions = list.map((q) => q.trim()).filter((q) => q !== '');
+  if (questions.length === 0) return null;
+
+  const reason = typeof rec.reason === 'string' && rec.reason.trim() !== '' ? rec.reason.trim() : undefined;
+  return { questions, ...(reason !== undefined ? { reason } : {}) };
 }
 
 /** 生成工具结果的摘要（供 SSE 帧） */

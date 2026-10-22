@@ -32,6 +32,7 @@ process.env['RECORDS_RETENTION_DAYS'] = '2';
 const {
   analysisStats,
   countAnalysisRecords,
+  countAnalysisRecordsMatching,
   getAnalysisRecord,
   listAnalysisRecords,
   purgeAnalysisRecords,
@@ -236,6 +237,34 @@ test('排序：overall 升序取到最低分', () => {
   const rows = listAnalysisRecords({ orderBy: 'overall', ascending: true, limit: 3 });
   assert.equal(rows.length, 3);
   assert.ok(rows[0]!.overall <= rows[1]!.overall);
+});
+
+test('筛选后的 total 必须与列表同集合（不能永远返回全表条数）', () => {
+  const all = countAnalysisRecords();
+  assert.ok(all > 0);
+
+  const lowRows = listAnalysisRecords({ maxScore: 74, limit: 100 });
+  const lowTotal = countAnalysisRecordsMatching({ maxScore: 74 });
+  assert.equal(lowTotal, lowRows.length, 'total 应等于筛选结果数（样本未超过分页上限）');
+  assert.ok(lowTotal < all, '该筛选应筛掉一部分记录，否则本用例失去意义');
+
+  // 不带条件时与全表计数一致
+  assert.equal(countAnalysisRecordsMatching(), all);
+});
+
+test('返回 total 的接口也遵守筛选条件（HTTP 层回归）', async () => {
+  process.env['ADMIN_ENABLED'] = 'true';
+  process.env['ADMIN_TOKEN'] = 'records-test-token';
+
+  const filtered = await call('/v1/admin/records?maxScore=74&limit=1', 'GET', undefined, {
+    'x-admin-token': 'records-test-token',
+  });
+  assert.equal(filtered.status, 200);
+  const body = JSON.parse(filtered.body) as { records: unknown[]; total: number };
+
+  assert.equal(body.records.length, 1);
+  assert.equal(body.total, countAnalysisRecordsMatching({ maxScore: 74 }));
+  assert.ok(body.total < countAnalysisRecords(), '筛后的 total 不应等于全表');
 });
 
 // ── 三、聚合（核心回归：不得退化为「最近 N 条」）───────────

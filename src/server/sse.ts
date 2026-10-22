@@ -27,7 +27,15 @@
 
 import type { ServerResponse } from 'node:http';
 
-export type StatusType = 'thinking' | 'tool' | 'tool_result' | 'limit' | 'queued' | 'reflection';
+export type StatusType =
+  | 'thinking'
+  | 'tool'
+  | 'tool_result'
+  | 'limit'
+  | 'queued'
+  | 'reflection'
+  /** 模型向用户提问（`ask_user`）。前端渲染成可作答的追问块 */
+  | 'ask';
 
 export interface SseWriterOptions {
   /** 心跳间隔（毫秒）；0 表示关闭 */
@@ -103,6 +111,20 @@ export class SseWriter {
   /** 达到轮次上限 */
   limit(rounds: number): void {
     this.status({ type: 'limit', rounds });
+  }
+
+  /**
+   * 向用户提问。
+   *
+   * 与普通正文分开传：前端需要把问题渲染成**可作答的块**（每个问题一个输入位），
+   * 从正文里用正则抠问题是不可靠的——模型会用各种措辞重述同一件事。
+   */
+  ask(questions: string[], reason?: string): void {
+    this.status({
+      type: 'ask',
+      questions,
+      ...(reason !== undefined && reason !== '' ? { reason } : {}),
+    });
   }
 
   /** 通用 status 帧 */

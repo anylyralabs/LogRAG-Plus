@@ -42,10 +42,30 @@ test('创建会话', () => {
   assert.ok(s.expiresAt > s.createdAt);
 });
 
-test('携带 logId：同一日志复用会话（不重复创建）', () => {
-  const a = findOrCreateSession('2usuLih', 3600);
-  const b = findOrCreateSession('2usuLih', 3600);
-  assert.equal(a.id, b.id, '同一 logId 应复用会话');
+test('携带 logId：同一主体复用会话（不重复创建）', () => {
+  const a = findOrCreateSession('2usuLih', 3600, 'fp:alice');
+  const b = findOrCreateSession('2usuLih', 3600, 'fp:alice');
+  assert.equal(a.id, b.id, '同一主体在同一日志下应复用会话');
+});
+
+test('同一日志、不同主体不复用会话（隐私：日志 ID 是公开的）', () => {
+  const alice = findOrCreateSession('3pubLic', 3600, 'fp:alice');
+  const bob = findOrCreateSession('3pubLic', 3600, 'fp:bob');
+  assert.notEqual(alice.id, bob.id, '不同访客不得进入同一个会话');
+
+  // 各自的追问不会串到对方会话
+  appendMessage(alice.id, 'user', 'alice 的问题');
+  appendMessage(bob.id, 'user', 'bob 的问题');
+  assert.equal(getHistory(alice.id).length, 1);
+  assert.equal(getHistory(alice.id)[0]?.content, 'alice 的问题');
+  assert.equal(getHistory(bob.id)[0]?.content, 'bob 的问题');
+});
+
+test('没有主体标识时不按 logId 复用（宁可多建，不把两人拼一起）', () => {
+  const a = findOrCreateSession('4noOwne', 3600);
+  const b = findOrCreateSession('4noOwne', 3600);
+  assert.notEqual(a.id, b.id);
+  assert.equal(a.owner, null);
 });
 
 test('不同 logId 建不同会话', () => {
@@ -78,6 +98,38 @@ test('消息追加与历史（时间正序）', () => {
   assert.equal(history[1]?.role, 'assistant');
   assert.equal(history[1]?.reasoning, '思维链A');
   assert.equal(history[2]?.content, '第二条');
+});
+
+test('自评摘要随消息持久化并可回放', () => {
+  const s = findOrCreateSession(null, 3600);
+  const score = {
+    overall: 92,
+    deliverable: true,
+    dimensions: { grounding: 79, verification: 100, actionability: 100, economy: 100 },
+    deductions: ['6 条断言没有可核实的标识'],
+    missingAnchors: ['libSDL3.so'],
+  };
+  appendMessage(s.id, 'user', '问题');
+  appendMessage(s.id, 'assistant', '回答', '思维链', score);
+
+  const history = getHistory(s.id);
+  assert.equal(history[1]?.score?.overall, 92);
+  assert.equal(history[1]?.score?.deliverable, true);
+  assert.deepEqual(history[1]?.score?.missingAnchors, ['libSDL3.so']);
+  // 用户消息不应带评分
+  assert.equal(history[0]?.score, null);
+});
+
+test('损坏的自评 JSON 按 null 处理，不影响其余历史', async () => {
+  const s = findOrCreateSession(null, 3600);
+  appendMessage(s.id, 'assistant', '回答');
+  // 直接写入坏数据（模拟旧版本或外部写入）
+  const { getDb } = await import('../src/store/db.ts');
+  getDb().prepare("UPDATE messages SET score = '{bad json' WHERE session_id = ?").run(s.id);
+
+  const history = getHistory(s.id);
+  assert.equal(history.length, 1);
+  assert.equal(history[0]?.score, null);
 });
 
 test('历史条数上限（控制 token 消耗）', () => {

@@ -267,8 +267,24 @@ async function postUpload(
       signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
     });
 
+    /*
+     * 上游有**两种**响应形状，必须都接受（实测缺陷，2026-10-21）：
+     *
+     *   公网 `POST /v1/log`：`{ success, message, id, url, raw, token }`  —— 字段在顶层
+     *   内部 `POST /v1/log`：`{ success, data: { id, token, raw } }`        —— 包在 data 里
+     *
+     * 原实现只认后者，于是公网上传永远报「上传响应缺少日志 ID」并返回 502。
+     * 这个缺陷长期没暴露，是因为开发时一直配着内部 URL 走内部路径；
+     * 上游一断，兜底到公网就整条路走不通。
+     */
     const body = (await res.json()) as {
       success?: boolean;
+      /** 公网形态：字段在顶层 */
+      id?: string;
+      token?: string;
+      raw?: string;
+      url?: string;
+      /** 内部形态：字段包在 data 里 */
       data?: { id?: string; token?: string; raw?: string; url?: string };
       message?: string;
       error?: string;
@@ -281,15 +297,25 @@ async function postUpload(
       };
     }
 
-    if (body.data?.id === undefined) {
-      return { ok: false, error: '上传响应缺少日志 ID' };
+    // 两种形态取并集：顶层优先（公网），再退到 data（内部）
+    const id = body.id ?? body.data?.id;
+    const deleteToken = body.token ?? body.data?.token;
+    const rawUrl = body.raw ?? body.data?.raw;
+
+    if (id === undefined || id === '') {
+      return {
+        ok: false,
+        error:
+          '上传响应缺少日志 ID（上游返回了 success 但没有 id）。' +
+          `响应键：${Object.keys(body).join(', ')}`,
+      };
     }
 
     return {
       ok: true,
-      id: body.data.id,
-      ...(body.data.token !== undefined ? { token: body.data.token } : {}),
-      ...(body.data.raw !== undefined ? { raw: body.data.raw } : {}),
+      id,
+      ...(deleteToken !== undefined ? { token: deleteToken } : {}),
+      ...(rawUrl !== undefined ? { raw: rawUrl } : {}),
     };
   } catch (e) {
     return { ok: false, error: `上传请求失败：${e instanceof Error ? e.message : String(e)}` };

@@ -143,6 +143,12 @@ test('worker 线程：CPU 密集检索不阻塞主线程事件循环', async () 
   //    另一条线程上，调用立即返回，`setTimeout(0)` 先跑、此时扫描尚未完成。
   //    因此「让出一个宏任务后，扫描是否仍未完成」是二值结论：
   //    没让出去 = 它占着主线程，正是 1423ms 停顿的成因。
+  // 先预热 worker 池：首次调用要 `new Worker()`，而**创建线程是同步的**，
+  // 会占住主线程几百毫秒。并行跑时这点同步开销足以让下面的 `setTimeout(0)`
+  // 抢不到执行机会，从而误判成「检索跑在主线程上」——实测全量红、单跑绿。
+  // 预热后测的才是「扫描本身是否在另一条线程」，这才是要守的性质。
+  await grepLog('warmup', { pattern: 'x', maxMatches: 1 });
+
   let settled = false;
   const scan = grepLog(big, { pattern: 'padding', maxMatches: 5, contextLines: 0 }).then((r) => {
     settled = true;

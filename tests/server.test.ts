@@ -144,7 +144,7 @@ test('会话回放：返回消息与轮次余量', async () => {
     ok: boolean;
     session: { id: string; logId: string | null };
     rounds: { allowed: boolean; remaining: number };
-    messages: Array<{ role: string; content: string; reasoning?: string }>;
+    messages: Array<{ role: string; content: string; reasoning?: string; score?: unknown }>;
   };
 
   assert.equal(body.ok, true);
@@ -157,6 +157,51 @@ test('会话回放：返回消息与轮次余量', async () => {
   // 已用 1 轮，上限 3 → 剩 2
   assert.equal(body.rounds.remaining, 2);
   assert.equal(body.rounds.allowed, true);
+});
+
+test('会话回放：自评摘要随消息返回（刷新后自检面板不丢）', async () => {
+  const s = findOrCreateSession(null, 3600);
+  appendMessage(s.id, 'user', '为什么崩溃？');
+  appendMessage(s.id, 'assistant', '根因是…', '推理', {
+    overall: 88,
+    deliverable: true,
+    dimensions: { grounding: 76, verification: 100, actionability: 80, economy: 100 },
+    deductions: ['有 2 条断言缺少可核实标识'],
+    missingAnchors: ['libGL.so'],
+  });
+
+  const res = await fetch(`${origin}/v1/session/${encodeURIComponent(s.id)}`);
+  const body = (await res.json()) as {
+    messages: Array<{ role: string; score?: { overall: number; missingAnchors: string[] } }>;
+  };
+
+  assert.equal(body.messages[1]?.score?.overall, 88);
+  assert.deepEqual(body.messages[1]?.score?.missingAnchors, ['libGL.so']);
+  // 用户消息不应带自评
+  assert.equal(body.messages[0]?.score, undefined);
+});
+
+// ── 自定义供应商 SSRF 门禁 ───────────────────────────────
+
+test('对话：自定义供应商指向回环地址被拒绝（SSRF）', async () => {
+  const res = await postChat({
+    message: '测试供应商地址',
+    provider: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'stub' },
+  });
+
+  assert.equal(res.status, 400);
+  const body = JSON.parse(res.body) as { ok: boolean; error: string };
+  assert.equal(body.ok, false);
+  assert.ok(body.error.includes('供应商'), `错误应指明供应商地址，实际：${body.error}`);
+});
+
+test('对话：自定义供应商指向链路本地地址被拒绝', async () => {
+  const res = await postChat({
+    message: '测试元数据端点',
+    provider: { baseUrl: 'http://169.254.169.254/latest/meta-data/', apiKey: '', model: 'stub' },
+  });
+
+  assert.equal(res.status, 400);
 });
 
 test('会话回放：畸形百分号编码返回 400（不能冒泡成 500）', async () => {

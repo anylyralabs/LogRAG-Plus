@@ -280,15 +280,13 @@ export interface RecordFilter {
 const ORDERABLE: ReadonlySet<string> = new Set(['created', 'overall', 'rounds', 'tool_calls']);
 
 /**
- * 分页查询分析记录。
+ * 把筛选条件编译成 WHERE 子句。
  *
- * `limit` 会被夹到 `records.maxPageSize`——HTTP 层不得放宽，
- * 否则一次请求就能把整张表读出来（这是 LogShare 那边踩过的坑：
- * 内部聚合调用方必须显式放宽上限，而不是靠 HTTP 参数透传）。
+ * 列表与计数**必须共用同一份条件**：曾经 `total` 永远返回全表条数，
+ * 于是「筛选后共 3 条」却显示 20 页——翻页后全是空页，且没有任何报错。
+ * 这类缺陷在管理台最容易被当成「后端没数据」。
  */
-export function listAnalysisRecords(filter: RecordFilter = {}): AnalysisRecord[] {
-  const db = getDb();
-
+function compileFilter(filter: RecordFilter): { where: string; params: Array<string | number> } {
   const where: string[] = [];
   const params: Array<string | number> = [];
 
@@ -321,6 +319,20 @@ export function listAnalysisRecords(filter: RecordFilter = {}): AnalysisRecord[]
     params.push(filter.until);
   }
 
+  return { where: where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '', params };
+}
+
+/**
+ * 分页查询分析记录。
+ *
+ * `limit` 会被夹到 `records.maxPageSize`——HTTP 层不得放宽，
+ * 否则一次请求就能把整张表读出来（这是 LogShare 那边踩过的坑：
+ * 内部聚合调用方必须显式放宽上限，而不是靠 HTTP 参数透传）。
+ */
+export function listAnalysisRecords(filter: RecordFilter = {}): AnalysisRecord[] {
+  const db = getDb();
+  const { where, params } = compileFilter(filter);
+
   const orderCol = filter.orderBy !== undefined && ORDERABLE.has(filter.orderBy) ? filter.orderBy : 'created';
   const dir = filter.ascending === true ? 'ASC' : 'DESC';
 
@@ -330,7 +342,7 @@ export function listAnalysisRecords(filter: RecordFilter = {}): AnalysisRecord[]
 
   const sql =
     `SELECT * FROM analysis_records` +
-    (where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '') +
+    where +
     ` ORDER BY ${orderCol} ${dir} LIMIT ? OFFSET ?`;
 
   const rows = db.prepare(sql).all(...params, limit, offset) as unknown as Row[];
@@ -487,5 +499,20 @@ export function purgeAnalysisRecords(): number {
 export function countAnalysisRecords(): number {
   const db = getDb();
   const row = db.prepare('SELECT COUNT(*) AS n FROM analysis_records').get() as { n: number } | undefined;
+  return row?.n ?? 0;
+}
+
+/**
+ * 按筛选条件计数（分页用）。
+ *
+ * 与 `listAnalysisRecords` 共用 `compileFilter`，保证「总数」与「列表」永远
+ * 是同一个集合。不带条件时等价于 `countAnalysisRecords`。
+ */
+export function countAnalysisRecordsMatching(filter: RecordFilter = {}): number {
+  const db = getDb();
+  const { where, params } = compileFilter(filter);
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM analysis_records${where}`).get(...params) as
+    | { n: number }
+    | undefined;
   return row?.n ?? 0;
 }

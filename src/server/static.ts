@@ -33,10 +33,9 @@ import { web as webCfg } from '../config.ts';
 /**
  * 前端产物目录。
  *
- * **前端目前不由本仓库提供**（`web/` 已整体移除，前端另行开发）。
- * 这个模块保留下来，是因为它承载的规则与前端框架无关：
- * 「只有资源目录读盘、文件名限单段白名单、其余路径回退入口页」。
- * 将来前端产物放在哪，只需 `WEB_DIR` 指过去；未配置或无产物时托管层整体跳过，
+ * 前端在仓库内的 `web/`（Vue 3 + Vite），本模块只负责托管它的产物。
+ * 规则与前端框架无关：只有资源目录读盘、文件名限单段白名单、其余路径回退入口页。
+ * 产物放在哪由 `WEB_DIR` 决定；未配置或无产物时托管层整体跳过，
  * 服务退化为纯 API（此时 `/logshare/*` 落到普通 404，不影响 `/v1/*`）。
  *
  * 默认值是**工作目录下的 `web/dist`**（与 Vite/Nuxt 等常见的 `dist` 习惯一致）。
@@ -86,6 +85,39 @@ export function webDir(): string {
   return WEB_DIR;
 }
 
+/**
+ * 官网首页文件（`<WEB_DIR>/landing.html`）。
+ *
+ * 与应用分开：`/` 给未使用过的人看「这是什么」，`/logshare/` 才是应用。
+ * 两者刻意不共用入口——把产品说明和聊天界面塞进同一屏，会让第一次来的人
+ * 先面对一个输入框，而不知道自己该做什么。
+ *
+ * 文件不存在时（例如只部署了应用产物）回退为「重定向到 /logshare/」，
+ * 不报错——这是一条正常的降级路径，不是故障。
+ */
+const LANDING = join(WEB_DIR, 'landing.html');
+
+function sendLanding(res: ServerResponse, method: string): boolean {
+  if (!existsSync(LANDING)) return false;
+
+  let body: Buffer;
+  try {
+    body = readFileSync(LANDING);
+  } catch {
+    return false;
+  }
+
+  res.writeHead(200, {
+    'content-type': MIME['.html'] as string,
+    'content-length': String(body.byteLength),
+    'cache-control': 'no-cache',
+    'x-content-type-options': 'nosniff',
+  });
+  if (method === 'HEAD') res.end();
+  else res.end(body);
+  return true;
+}
+
 function sendIndex(res: ServerResponse, method: string): boolean {
   const index = join(WEB_DIR, 'index.html');
   if (!existsSync(index)) return false;
@@ -125,8 +157,9 @@ export function serveWeb(path: string, method: string, res: ServerResponse): boo
     return true;
   }
 
-  // 根路径：给人一个能直接点的入口（Human 访问域名时不该看到 404）
+  // 根路径：官网首页。没有 landing.html 时回退为重定向，避免白屏。
   if (path === '/' || path === '/index.html') {
+    if (sendLanding(res, method)) return true;
     res.writeHead(302, { location: `${BASE}/` });
     res.end();
     return true;
