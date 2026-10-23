@@ -18,14 +18,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Server } from 'node:http';
 
-const testDir = mkdtempSync(join(tmpdir(), 'lograg-contract-'));
+import { createTestDb } from './helpers/testdb.ts';
 
-process.env['DATA_DIR'] = testDir;
+const tdb = await createTestDb();
+
 process.env['LOGSHARE_INTERNAL_URL'] = '';
 process.env['LOGSHARE_PUBLIC_API_URL'] = '';
 process.env['AI_BASE_URL'] = 'http://127.0.0.1:9/v1';
@@ -35,7 +33,10 @@ process.env['ADMIN_ENABLED'] = 'true';
 process.env['ADMIN_TOKEN'] = 'contract-test-token';
 
 const { createHttpServer } = await import('../src/server/index.ts');
-const { appendMessage, closeStore, findOrCreateSession } = await import('../src/store/session.ts');
+const { appendMessage, findOrCreateSession } = await import('../src/store/session.ts');
+const { migrate } = await import('../src/store/migrate.ts');
+const { closePool } = await import('../src/store/mysql.ts');
+if (tdb.ok) await migrate();
 const { createDomainKnowledge } = await import('../src/knowledge/domain.ts');
 
 let server: Server;
@@ -55,8 +56,8 @@ test.after(async () => {
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });
-  closeStore();
-  rmSync(testDir, { recursive: true, force: true });
+  await closePool();
+  await tdb.dispose();
 });
 
 const ADMIN = { 'x-admin-token': 'contract-test-token' };
@@ -72,8 +73,8 @@ async function getJson(path: string, headers: Record<string, string> = {}): Prom
 // ── 会话回放 ─────────────────────────────────────────────
 
 test('会话回放：前端必读字段都在（session.id / rounds / messages）', async () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', '你好');
+  const s = await findOrCreateSession(null, 3600);
+  await appendMessage(s.id, 'user', '你好');
 
   const { status, body } = await getJson(`/v1/session/${encodeURIComponent(s.id)}`);
   assert.equal(status, 200);
@@ -89,9 +90,9 @@ test('会话回放：前端必读字段都在（session.id / rounds / messages�
 });
 
 test('会话回放：消息字段名与前端类型一致', async () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', '问题');
-  appendMessage(s.id, 'assistant', '回答', '思维链');
+  const s = await findOrCreateSession(null, 3600);
+  await appendMessage(s.id, 'user', '问题');
+  await appendMessage(s.id, 'assistant', '回答', { reasoning: '思维链' });
 
   const { body } = await getJson(`/v1/session/${encodeURIComponent(s.id)}`);
   const messages = body['messages'] as Array<Record<string, unknown>>;
@@ -130,9 +131,11 @@ test('上传：源码返回 logId 而不是 id（字段名静态守门）', asyn
   assert.ok(start >= 0, '找不到 handleUpload');
   const block = src.slice(start, start + 6000);
 
-  assert.match(block, /logId:\s*uploaded\.id/, '上传响应必须用 logId 字段');
-  assert.doesNotMatch(block, /^\s*id:\s*uploaded\.id/m, '不应再返回裸 id 字段');
-  assert.match(block, /maybeObfuscating:\s*true/, '刚上传的日志必须声明反混淆可能未完成');
+  // 架构改革后：上传直接落本库，返回的 logId 就是**会话 ID**（URL 形态 /s/{id}）
+  assert.match(block, /logId:\s*session\.id/, '上传响应必须用 logId 字段（值为会话 ID）');
+  assert.doesNotMatch(block, /^\s*id:\s*session\.id/m, '不应再返回裸 id 字段');
+  // 反混淆改为同步执行，用真实结果代替旧的「可能未完成」占位
+  assert.match(block, /deobfuscated:\s*deob\.changed/, '必须回报反混淆是否生效');
 });
 
 // ── 领域知识 ─────────────────────────────────────────────

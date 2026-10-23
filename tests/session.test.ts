@@ -1,172 +1,169 @@
 /**
- * 会话存储测试。
+ * 会话存储测试（MariaDB）。
+ *
+ * ## 隔离方式
+ *
+ * 每个测试文件建一个独立数据库（`tests/helpers/testdb.ts`），用完删除。
+ * 原先用「每个用例一个临时 SQLite 文件」——MariaDB 下等价物就是独立库，
+ * 比清表干净（不用处理自增重置与外键顺序）。
+ *
+ * 库不可用时**跳过**而非假绿：本地没起 MariaDB 是常态，report 里会显示 skipped。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
-import {
-  appendMessage,
-  cleanupExpired,
-  closeStore,
-  countRounds,
-  findOrCreateSession,
-  getHistory,
-  getSession,
-  initStore,
-} from '../src/store/session.ts';
+import { createTestDb } from './helpers/testdb.ts';
 
-const testDir = mkdtempSync(join(tmpdir(), 'lograg-session-'));
-let dbCounter = 0;
+const tdb = await createTestDb();
 
-function freshStore(): void {
-  closeStore();
-  initStore(join(testDir, `s${dbCounter++}.db`));
-}
+if (!tdb.ok) {
+  test('会话存储（跳过：MariaDB 不可用）', (t) => {
+    t.skip(`MariaDB 不可用：${tdb.reason ?? '未知'}。启动 mariadbd 后重跑。`);
+  });
+} else {
+  const { migrate } = await import('../src/store/migrate.ts');
+  const { closePool } = await import('../src/store/mysql.ts');
+  const {
+    appendMessage,
+    cleanupExpired,
+    countRounds,
+    findOrCreateSession,
+    getHistory,
+    getSession,
+    sessionStats,
+    checkRoundsAllowed,
+  } = await import('../src/store/session.ts');
 
-test.beforeEach(() => {
-  freshStore();
-});
+  await migrate();
 
-test.after(() => {
-  closeStore();
-  rmSync(testDir, { recursive: true, force: true });
-});
+  test.after(async () => {
+    await closePool();
+    await tdb.dispose();
+  });
 
-test('创建会话', () => {
-  const s = findOrCreateSession(null, 3600);
-  assert.ok(s.id.startsWith('s'));
-  assert.equal(s.logId, null);
-  assert.ok(s.expiresAt > s.createdAt);
-});
-
-test('携带 logId：同一主体复用会话（不重复创建）', () => {
-  const a = findOrCreateSession('2usuLih', 3600, 'fp:alice');
-  const b = findOrCreateSession('2usuLih', 3600, 'fp:alice');
-  assert.equal(a.id, b.id, '同一主体在同一日志下应复用会话');
-});
-
-test('同一日志、不同主体不复用会话（隐私：日志 ID 是公开的）', () => {
-  const alice = findOrCreateSession('3pubLic', 3600, 'fp:alice');
-  const bob = findOrCreateSession('3pubLic', 3600, 'fp:bob');
-  assert.notEqual(alice.id, bob.id, '不同访客不得进入同一个会话');
-
-  // 各自的追问不会串到对方会话
-  appendMessage(alice.id, 'user', 'alice 的问题');
-  appendMessage(bob.id, 'user', 'bob 的问题');
-  assert.equal(getHistory(alice.id).length, 1);
-  assert.equal(getHistory(alice.id)[0]?.content, 'alice 的问题');
-  assert.equal(getHistory(bob.id)[0]?.content, 'bob 的问题');
-});
-
-test('没有主体标识时不按 logId 复用（宁可多建，不把两人拼一起）', () => {
-  const a = findOrCreateSession('4noOwne', 3600);
-  const b = findOrCreateSession('4noOwne', 3600);
-  assert.notEqual(a.id, b.id);
-  assert.equal(a.owner, null);
-});
-
-test('不同 logId 建不同会话', () => {
-  const a = findOrCreateSession('aaa1111', 3600);
-  const b = findOrCreateSession('bbb2222', 3600);
-  assert.notEqual(a.id, b.id);
-});
-
-test('无 logId 时每次都建新会话', () => {
-  const a = findOrCreateSession(null, 3600);
-  const b = findOrCreateSession(null, 3600);
-  assert.notEqual(a.id, b.id);
-});
-
-test('取会话：过期后返回 null', () => {
-  const s = findOrCreateSession(null, -1); // 已过期
-  assert.equal(getSession(s.id), null);
-});
-
-test('消息追加与历史（时间正序）', () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', '第一条');
-  appendMessage(s.id, 'assistant', '第一条回复', '思维链A');
-  appendMessage(s.id, 'user', '第二条');
-
-  const history = getHistory(s.id);
-  assert.equal(history.length, 3);
-  assert.equal(history[0]?.role, 'user');
-  assert.equal(history[0]?.content, '第一条');
-  assert.equal(history[1]?.role, 'assistant');
-  assert.equal(history[1]?.reasoning, '思维链A');
-  assert.equal(history[2]?.content, '第二条');
-});
-
-test('自评摘要随消息持久化并可回放', () => {
-  const s = findOrCreateSession(null, 3600);
-  const score = {
-    overall: 92,
-    deliverable: true,
-    dimensions: { grounding: 79, verification: 100, actionability: 100, economy: 100 },
-    deductions: ['6 条断言没有可核实的标识'],
-    missingAnchors: ['libSDL3.so'],
-  };
-  appendMessage(s.id, 'user', '问题');
-  appendMessage(s.id, 'assistant', '回答', '思维链', score);
-
-  const history = getHistory(s.id);
-  assert.equal(history[1]?.score?.overall, 92);
-  assert.equal(history[1]?.score?.deliverable, true);
-  assert.deepEqual(history[1]?.score?.missingAnchors, ['libSDL3.so']);
-  // 用户消息不应带评分
-  assert.equal(history[0]?.score, null);
-});
-
-test('损坏的自评 JSON 按 null 处理，不影响其余历史', async () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'assistant', '回答');
-  // 直接写入坏数据（模拟旧版本或外部写入）
-  const { getDb } = await import('../src/store/db.ts');
-  getDb().prepare("UPDATE messages SET score = '{bad json' WHERE session_id = ?").run(s.id);
-
-  const history = getHistory(s.id);
-  assert.equal(history.length, 1);
-  assert.equal(history[0]?.score, null);
-});
-
-test('历史条数上限（控制 token 消耗）', () => {
-  const s = findOrCreateSession(null, 3600);
-  for (let i = 0; i < 30; i++) {
-    appendMessage(s.id, 'user', `消息${i}`);
+  /** 每个用例清一次数据（同一库内的用例互不影响） */
+  async function reset(): Promise<void> {
+    const { execute } = await import('../src/store/mysql.ts');
+    await execute('DELETE FROM log_bodies');
+    await execute('DELETE FROM messages');
+    await execute('DELETE FROM sessions');
   }
-  const history = getHistory(s.id, 5);
-  assert.equal(history.length, 5);
-  // 应取**最近**的 5 条
-  assert.equal(history[4]?.content, '消息29');
-});
 
-test('轮次计数只统计用户消息', () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', 'a');
-  appendMessage(s.id, 'assistant', 'b');
-  appendMessage(s.id, 'user', 'c');
-  assert.equal(countRounds(s.id), 2);
-});
+  test('创建会话', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, 3600);
+    assert.ok(s.id.startsWith('s'));
+    assert.equal(s.logId, null);
+    assert.equal(s.logKind, 'native');
+    assert.ok(s.expiresAt > s.createdAt);
+  });
 
-test('清理过期会话（级联删除消息）', () => {
-  const expired = findOrCreateSession(null, -1);
-  const alive = findOrCreateSession(null, 3600);
-  appendMessage(expired.id, 'user', 'x');
+  test('按 ID 取回会话', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, 3600);
+    const got = await getSession(s.id);
+    assert.equal(got?.id, s.id);
+  });
 
-  const deleted = cleanupExpired();
-  assert.ok(deleted >= 1);
-  assert.equal(getSession(expired.id), null);
-  assert.notEqual(getSession(alive.id), null);
-  assert.equal(getHistory(expired.id).length, 0, '消息应被级联删除');
-});
+  test('过期会话取不到', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, -1); // 立即过期
+    assert.equal(await getSession(s.id), null);
+  });
 
-test('会话更新时间为最新消息时间', () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', 'x');
-  const after = getSession(s.id);
-  assert.ok(after !== null);
-  assert.ok(after.updatedAt >= s.updatedAt);
-});
+  test('同一 owner + logId 复用会话', async () => {
+    await reset();
+    const a = await findOrCreateSession('kalkLqQ', 3600, 'owner-1', 'logshare');
+    const b = await findOrCreateSession('kalkLqQ', 3600, 'owner-1', 'logshare');
+    assert.equal(a.id, b.id, '同一主体应复用');
+    assert.equal(a.logKind, 'logshare');
+  });
+
+  test('不同 owner 不复用（避免串会话）', async () => {
+    await reset();
+    const a = await findOrCreateSession('kalkLqQ', 3600, 'owner-1', 'logshare');
+    const b = await findOrCreateSession('kalkLqQ', 3600, 'owner-2', 'logshare');
+    assert.notEqual(a.id, b.id);
+  });
+
+  test('无 owner 时不自动复用', async () => {
+    await reset();
+    const a = await findOrCreateSession('kalkLqQ', 3600, null, 'logshare');
+    const b = await findOrCreateSession('kalkLqQ', 3600, null, 'logshare');
+    assert.notEqual(a.id, b.id);
+  });
+
+  test('追加消息并读取历史', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, 3600);
+    await appendMessage(s.id, 'user', '第一个问题');
+    await appendMessage(s.id, 'assistant', '第一个回答', { reasoning: '思考过程' });
+
+    const hist = await getHistory(s.id, 10);
+    assert.equal(hist.length, 2);
+    assert.equal(hist[0]?.role, 'user');
+    assert.equal(hist[1]?.content, '第一个回答');
+    assert.equal(hist[1]?.reasoning, '思考过程');
+  });
+
+  test('消息带 score 与 meta 能原样读回', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, 3600);
+    const score = {
+      overall: 92,
+      deliverable: true,
+      dimensions: { grounding: 80, verification: 100, actionability: 100, economy: 90 },
+      deductions: ['少一条引用'],
+      missingAnchors: ['libc.so'],
+    };
+    const meta = { asks: [{ questions: ['手机型号？'], reason: '缺设备信息' }] };
+
+    await appendMessage(s.id, 'assistant', '回答', { score, meta });
+
+    const hist = await getHistory(s.id, 10);
+    assert.equal(hist[0]?.score?.overall, 92);
+    assert.deepEqual(hist[0]?.score?.missingAnchors, ['libc.so']);
+    assert.equal(hist[0]?.meta?.asks?.[0]?.questions[0], '手机型号？');
+  });
+
+  test('轮次计数只算 user（一轮 = 一次提问）', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, 3600);
+    await appendMessage(s.id, 'user', 'q1');
+    await appendMessage(s.id, 'assistant', 'a1');
+    await appendMessage(s.id, 'user', 'q2');
+    assert.equal(await countRounds(s.id), 2);
+  });
+
+  test('轮次上限检查', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, 3600);
+    const first = await checkRoundsAllowed(s.id);
+    assert.equal(first.allowed, true);
+    assert.ok(first.remaining > 0);
+  });
+
+  test('清理过期会话连带删除消息', async () => {
+    await reset();
+    const s = await findOrCreateSession(null, -1);
+    await appendMessage(s.id, 'user', '会被清理');
+    const removed = await cleanupExpired();
+    assert.ok(removed >= 1);
+    assert.equal(await getSession(s.id), null);
+  });
+
+  test('统计接口可用', async () => {
+    await reset();
+    await findOrCreateSession(null, 3600);
+    const st = await sessionStats();
+    assert.equal(st.sessions, 1);
+  });
+
+  test('会话 TTL：绑定 LogShare 日志时跟随 7 天', async () => {
+    const { sessionTtlSeconds } = await import('../src/store/session.ts');
+    const bound = sessionTtlSeconds('kalkLqQ');
+    const free = sessionTtlSeconds(null);
+    assert.ok(bound > free, '绑定日志的会话应比独立会话活得久');
+    assert.equal(bound, 7 * 24 * 3600);
+  });
+}

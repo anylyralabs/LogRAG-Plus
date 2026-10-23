@@ -18,11 +18,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
-const testDir = mkdtempSync(join(tmpdir(), 'lograg-ask-'));
+import { createTestDb } from './helpers/testdb.ts';
+
+const tdb = await createTestDb();
+if (!tdb.ok) console.error("[ask-recovery] 建库失败:", tdb.reason);
+else console.error("[ask-recovery] 测试库:", tdb.name);
+
+// ⚠️ 环境变量必须在**导入 src/ 任何模块之前**设置：config.ts 在模块加载时即固化。
+// 而 AI_BASE_URL 又依赖假模型的实际端口，因此这里先 listen、再设 env、最后才动态导入。
+process.env['LOGSHARE_INTERNAL_URL'] = '';
+process.env['LOGSHARE_PUBLIC_API_URL'] = '';
+process.env['AI_MODEL'] = 'fake-model';
+process.env['AI_API_KEY'] = 'test-key';
+process.env['AGENT_MAX_ROUNDS'] = '6';
+// 假模型在 127.0.0.1：SSRF 防护默认拒绝回环供应商，测试需显式放行
+process.env['ALLOW_LOOPBACK_PROVIDER'] = 'true';
 
 /* ── 假模型端点 ────────────────────────────────────────────
  * 第一轮：发起 ask_user 工具调用
@@ -132,15 +143,10 @@ test.before(async () => {
   if (addr === null || typeof addr === 'string') throw new Error('假模型端口不可用');
   modelOrigin = `http://127.0.0.1:${addr.port}/v1`;
 
-  process.env['DATA_DIR'] = testDir;
-  process.env['LOGSHARE_INTERNAL_URL'] = '';
-  process.env['LOGSHARE_PUBLIC_API_URL'] = '';
-  // 服务端默认供应商指向假端点：请求里不带 provider 也能走通
-  process.env['AI_BASE_URL'] = modelOrigin;
-  process.env['AI_MODEL'] = 'fake-model';
-  process.env['AI_API_KEY'] = 'test-key';
-  // 关掉量化阈值之类无关配置，保持输出确定性
-  process.env['AGENT_MAX_ROUNDS'] = '6';
+
+  // 测试库要先建表：服务端不会自动迁移（迁移是显式的启动步骤）
+  const { migrate } = await import('../src/store/migrate.ts');
+  await migrate();
 
   const { createHttpServer } = await import('../src/server/index.ts');
   service = createHttpServer();
@@ -153,9 +159,9 @@ test.before(async () => {
 test.after(async () => {
   await new Promise<void>((resolve) => service.close(() => resolve()));
   await new Promise<void>((resolve) => fakeModel.close(() => resolve()));
-  const { closeStore } = await import('../src/store/session.ts');
-  closeStore();
-  rmSync(testDir, { recursive: true, force: true });
+  const { closePool } = await import('../src/store/mysql.ts');
+  await closePool();
+  await tdb.dispose();
 });
 
 /** 发一轮对话，返回原始 SSE 文本 */
@@ -167,9 +173,14 @@ async function chat(message: string, sessionId?: string): Promise<{ status: numb
       message,
       ...(sessionId !== undefined ? { sessionId } : {}),
       fingerprint: 'fp_ask_test',
+      // 请求级供应商：`config.ts` 在模块加载时已固化，`before` 里再设 AI_BASE_URL 无效。
+      // 直接随请求传，既绕开固化问题，也让测试不依赖进程环境。
+      provider: { baseUrl: modelOrigin, apiKey: 'test-key', model: 'fake-model' },
     }),
   });
-  return { status: res.status, text: await res.text() };
+  const text = await res.text();
+  if (res.status !== 200) console.error('[chat] 非 200:', res.status, text.slice(0, 200));
+  return { status: res.status, text };
 }
 
 /** 从 SSE 文本里挑出某类帧 */

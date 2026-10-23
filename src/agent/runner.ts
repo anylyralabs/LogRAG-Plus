@@ -200,7 +200,7 @@ async function runSynthesis(options: RunOptions, prev: RunResult): Promise<RunRe
 
   const model = createModel(provider);
   const messages = [
-    { role: 'system' as const, content: buildSystemPrompt({ ...promptContext, toolNames: [] }) },
+    { role: 'system' as const, content: await buildSystemPrompt({ ...promptContext, toolNames: [] }) },
     { role: 'user' as const, content: buildSynthesisMessage(options, prev) },
   ];
 
@@ -359,11 +359,11 @@ async function runAgentOnce(options: RunOptions): Promise<RunResult> {
   } = options;
 
   const model = createModel(provider);
-  const tools = buildTools(toolContext);
+  const tools = await buildTools(toolContext);
   // 工具名清单在下发提示词时才拿到，故在此合并进提示词上下文。
   // 目的是让模型看到**本轮真实可用**的工具名（受配置与是否有日志影响），
   // 而不是一个写死在提示词里的漏项清单。
-  const systemPrompt = buildSystemPrompt({
+  const systemPrompt = await buildSystemPrompt({
     ...promptContext,
     toolNames: tools.map((t) => t.name),
   });

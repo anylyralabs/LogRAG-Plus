@@ -82,7 +82,7 @@ const looseInt = (desc: string, min: number, max: number) =>
  *
  * 工具是按会话创建的（依赖 logContent 等上下文），不是全局单例。
  */
-export function buildTools(ctx: ToolContext) {
+export async function buildTools(ctx: ToolContext) {
   // ── 日志工具（仅在有日志时提供）─────────────────────────
   const logTools = [];
 
@@ -181,11 +181,33 @@ export function buildTools(ctx: ToolContext) {
   //
   // 只在**确有启用条目**时才注册：空工具会在清单里占位、诱导无意义的调用。
   const knowledgeTools = [];
-  if (domainKnowledgeCfg.enabled && listDomainKnowledge({ enabledOnly: true, limit: 1 }).length > 0) {
+  /*
+   * 只在确有启用条目时注册：空工具会在清单里占位、诱导无意义的调用。
+   *
+   * 这里**不能**在构建工具集时查库——`createToolContext` 是同步的（6 个测试与
+   * 调用方都按同步用），改成 async 会波及一大片。而「有没有条目」只影响
+   * 工具是否出现在清单里，可以在**第一次调用时**再判断：调用本身是 async，
+   * 拿不到条目就直接返回「没有匹配」。
+   */
+  /*
+   * 领域知识只是提示词增强，**查不到不该让整个工具集构建失败**：
+   * 库未配置/连接失败时按「没有条目」处理，工具集照常可用。
+   * 这与其他存储路径的处理不同（会话读写失败必须报错），因为
+   * 「少一段先验知识」是可降级的，而「建不了会话」不是。
+   */
+  let hasDomainEntries = false;
+  if (domainKnowledgeCfg.enabled) {
+    try {
+      hasDomainEntries = (await listDomainKnowledge({ enabledOnly: true, limit: 1 })).length > 0;
+    } catch {
+      hasDomainEntries = false;
+    }
+  }
+  if (hasDomainEntries) {
     knowledgeTools.push(
       tool(
         async ({ query }) => {
-          const hits = searchDomainKnowledge(query ?? '', 20);
+          const hits = await searchDomainKnowledge(query ?? '', 20);
           if (hits.length === 0) {
             return (
               '领域知识中没有与检索词匹配的条目。' +

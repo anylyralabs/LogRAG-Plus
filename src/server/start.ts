@@ -7,7 +7,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { describeConfig, server as serverCfg } from '../config.ts';
-import { closeStore } from '../store/session.ts';
+import { closePool } from '../store/mysql.ts';
 import { createHttpServer, startSessionCleanup } from './index.ts';
 import { webBuilt, webDir } from './static.ts';
 
@@ -147,7 +147,7 @@ function installShutdownHandlers(server: Server): void {
 
     const finish = async (): Promise<void> => {
       try {
-        closeStore();
+        await closePool();
       } catch {
         /* 关闭失败不阻断退出 */
       }
@@ -177,7 +177,7 @@ export async function stopServer(): Promise<void> {
     s.closeAllConnections?.();
   });
   try {
-    closeStore();
+    await closePool();
   } catch {
     /* ignore */
   }

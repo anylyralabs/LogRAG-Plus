@@ -98,7 +98,7 @@ const TOOL_RULES = `工具使用：
 /**
  * 组装系统提示词。
  */
-export function buildSystemPrompt(ctx: PromptContext = {}): string {
+export async function buildSystemPrompt(ctx: PromptContext = {}): Promise<string> {
   const parts: string[] = [IDENTITY, TOOL_RULES];
 
   // 工具名精确清单（消灭工具名幻觉）
@@ -128,16 +128,19 @@ export function buildSystemPrompt(ctx: PromptContext = {}): string {
   //
   // 默认从存储实时读取——这样运维在后台改一条，下一次分析就生效，不需要重启。
   // 读库失败不能让整次分析挂掉（提示词少一段，分析仍可进行），故兜底为空。
-  const injectedDomainKnowledge = ((): string => {
-    if (ctx.domainKnowledge !== undefined && ctx.domainKnowledge.trim() !== '') {
-      return ctx.domainKnowledge.trim();
-    }
+  // 领域知识注入改为异步（存储层是 MariaDB）。`buildSystemPrompt` 因此也是 async，
+  // 调用方需 await——这比在提示词里塞一个「同步缓存」干净：缓存会让
+  // 「运维刚改完条目、下一次分析却还用旧值」这种问题变得难以解释。
+  let injectedDomainKnowledge = '';
+  if (ctx.domainKnowledge !== undefined && ctx.domainKnowledge.trim() !== '') {
+    injectedDomainKnowledge = ctx.domainKnowledge.trim();
+  } else {
     try {
-      return renderDomainKnowledgeSection().text;
+      injectedDomainKnowledge = (await renderDomainKnowledgeSection()).text;
     } catch {
-      return '';
+      injectedDomainKnowledge = '';
     }
-  })();
+  }
 
   if (injectedDomainKnowledge !== '') {
     parts.push(`\n\n${'='.repeat(60)}\n${injectedDomainKnowledge}`);

@@ -23,48 +23,18 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { getDb, registerMigration } from '../store/db.ts';
+import { execute, query, queryOne } from '../store/mysql.ts';
 import { records as recordsCfg } from '../config.ts';
 import type { StructuredConclusion } from '../agent/structured.ts';
 import type { ScoreResult } from './scorer.ts';
 
 // ── 表结构 ───────────────────────────────────────────────
 
-registerMigration('analysis_records', (conn) => {
-  conn.exec(`
-    CREATE TABLE IF NOT EXISTS analysis_records (
-      id               TEXT PRIMARY KEY,
-      created          INTEGER NOT NULL,
-      session_id       TEXT NOT NULL,
-      log_id           TEXT,
-      provider         TEXT NOT NULL,
-      model            TEXT NOT NULL,
-      overall          INTEGER NOT NULL,
-      deliverable      INTEGER NOT NULL,
-      grounding        INTEGER,
-      verification     INTEGER NOT NULL,
-      actionability    INTEGER NOT NULL,
-      economy          INTEGER NOT NULL,
-      rounds           INTEGER NOT NULL,
-      tool_calls       INTEGER NOT NULL,
-      empty_calls      INTEGER NOT NULL,
-      failed_calls     INTEGER NOT NULL,
-      tool_names       TEXT NOT NULL,
-      root_cause       TEXT NOT NULL,
-      confidence       REAL,
-      evidence_count   INTEGER NOT NULL,
-      steps_count      INTEGER NOT NULL,
-      grounding_recall REAL,
-      deductions       TEXT NOT NULL,
-      missing_anchors  TEXT NOT NULL,
-      answer_chars     INTEGER NOT NULL
-    );
-  `);
-  conn.exec('CREATE INDEX IF NOT EXISTS idx_analysis_created ON analysis_records(created);');
-  conn.exec('CREATE INDEX IF NOT EXISTS idx_analysis_overall ON analysis_records(overall);');
-  conn.exec('CREATE INDEX IF NOT EXISTS idx_analysis_log ON analysis_records(log_id);');
-  conn.exec('CREATE INDEX IF NOT EXISTS idx_analysis_model ON analysis_records(model);');
-});
+/*
+ * 表结构由 `src/store/migrate.ts` 统一管理（MariaDB）。
+ * 原先这里的 SQLite `registerMigration` 已移除——两处建表必然漂移，
+ * 而漂移的表现是「字段名对不上导致插入静默失败」。
+ */
 
 // ── 写入 ─────────────────────────────────────────────────
 
@@ -105,8 +75,7 @@ function isEmptyResult(result: string): boolean {
 }
 
 /** 落一条分析记录，返回记录 ID */
-export function saveAnalysisRecord(input: SaveRecordInput): string {
-  const db = getDb();
+export async function saveAnalysisRecord(input: SaveRecordInput): Promise<string> {
   const id = `ar_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
   const d = input.score.dimensions;
 
@@ -119,7 +88,7 @@ export function saveAnalysisRecord(input: SaveRecordInput): string {
 
   const c = input.conclusion;
 
-  db.prepare(
+  await execute(
     `INSERT INTO analysis_records (
        id, created, session_id, log_id, provider, model,
        overall, deliverable, grounding, verification, actionability, economy,
@@ -127,7 +96,7 @@ export function saveAnalysisRecord(input: SaveRecordInput): string {
        root_cause, confidence, evidence_count, steps_count,
        grounding_recall, deductions, missing_anchors, answer_chars
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
+    [
     id,
     Math.floor(Date.now() / 1000),
     input.sessionId,
@@ -153,6 +122,7 @@ export function saveAnalysisRecord(input: SaveRecordInput): string {
     JSON.stringify(input.score.deductions.slice(0, 10)),
     JSON.stringify(input.score.groundingDetail.anchors.missing.slice(0, 10).map((a) => a.text)),
     input.answerChars,
+    ],
   );
 
   return id;
@@ -329,8 +299,7 @@ function compileFilter(filter: RecordFilter): { where: string; params: Array<str
  * 否则一次请求就能把整张表读出来（这是 LogShare 那边踩过的坑：
  * 内部聚合调用方必须显式放宽上限，而不是靠 HTTP 参数透传）。
  */
-export function listAnalysisRecords(filter: RecordFilter = {}): AnalysisRecord[] {
-  const db = getDb();
+export async function listAnalysisRecords(filter: RecordFilter = {}): Promise<AnalysisRecord[]> {
   const { where, params } = compileFilter(filter);
 
   const orderCol = filter.orderBy !== undefined && ORDERABLE.has(filter.orderBy) ? filter.orderBy : 'created';
@@ -345,15 +314,14 @@ export function listAnalysisRecords(filter: RecordFilter = {}): AnalysisRecord[]
     where +
     ` ORDER BY ${orderCol} ${dir} LIMIT ? OFFSET ?`;
 
-  const rows = db.prepare(sql).all(...params, limit, offset) as unknown as Row[];
+  const rows = await query<Row>(sql, [...params, limit, offset]);
   return rows.map(toRecord);
 }
 
 /** 取单条记录 */
-export function getAnalysisRecord(id: string): AnalysisRecord | null {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM analysis_records WHERE id = ?').get(id) as unknown as Row | undefined;
-  return row === undefined ? null : toRecord(row);
+export async function getAnalysisRecord(id: string): Promise<AnalysisRecord | null> {
+  const row = await queryOne<Row>('SELECT * FROM analysis_records WHERE id = ?', [id]);
+  return row === null ? null : toRecord(row);
 }
 
 /**
@@ -362,24 +330,24 @@ export function getAnalysisRecord(id: string): AnalysisRecord | null {
  * `pageSize` 显式放宽到 `records.maxAggregateRows`：聚合必须看到全量样本，
  * 否则「均值」会静默退化为「最近 N 条的均值」。
  */
-export function analysisStats(since?: number): AnalysisStats {
-  const db = getDb();
-
+export async function analysisStats(since?: number): Promise<AnalysisStats> {
   const maxRows = recordsCfg.maxAggregateRows;
   const sinceClause = since === undefined ? '' : ' WHERE created >= ?';
   const params: number[] = since === undefined ? [] : [since];
 
   // 先看总量，超过聚合上限时在返回值里显式标记「已截断」，
   // 而不是悄悄只统计一部分（静默的统计口径错误比不统计更糟）。
-  const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM analysis_records${sinceClause}`).get(...params) as
-    | { n: number }
-    | undefined;
-  const total = totalRow?.n ?? 0;
+  const totalRow = await queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM analysis_records${sinceClause}`,
+    params,
+  );
+  const total = Number(totalRow?.n ?? 0);
   const truncated = total > maxRows;
 
-  const rows = db
-    .prepare(`SELECT * FROM analysis_records${sinceClause} ORDER BY created DESC LIMIT ?`)
-    .all(...params, maxRows) as unknown as Row[];
+  const rows = await query<Row>(
+    `SELECT * FROM analysis_records${sinceClause} ORDER BY created DESC LIMIT ?`,
+    [...params, maxRows],
+  );
 
   if (rows.length === 0) {
     return {
@@ -488,18 +456,16 @@ export interface AnalysisStats {
  *
  * 返回删除条数。保留期由 `records.retentionDays` 控制（默认 90 天）。
  */
-export function purgeAnalysisRecords(): number {
-  const db = getDb();
+export async function purgeAnalysisRecords(): Promise<number> {
   const cutoff = Math.floor(Date.now() / 1000) - recordsCfg.retentionDays * 86400;
-  const res = db.prepare('DELETE FROM analysis_records WHERE created < ?').run(cutoff);
-  return Number(res.changes);
+  const res = await execute('DELETE FROM analysis_records WHERE created < ?', [cutoff]);
+  return res.affectedRows;
 }
 
 /** 记录总数（诊断用） */
-export function countAnalysisRecords(): number {
-  const db = getDb();
-  const row = db.prepare('SELECT COUNT(*) AS n FROM analysis_records').get() as { n: number } | undefined;
-  return row?.n ?? 0;
+export async function countAnalysisRecords(): Promise<number> {
+  const row = await queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM analysis_records');
+  return Number(row?.n ?? 0);
 }
 
 /**
@@ -508,11 +474,13 @@ export function countAnalysisRecords(): number {
  * 与 `listAnalysisRecords` 共用 `compileFilter`，保证「总数」与「列表」永远
  * 是同一个集合。不带条件时等价于 `countAnalysisRecords`。
  */
-export function countAnalysisRecordsMatching(filter: RecordFilter = {}): number {
-  const db = getDb();
+export async function countAnalysisRecordsMatching(
+  filter: RecordFilter = {},
+): Promise<number> {
   const { where, params } = compileFilter(filter);
-  const row = db.prepare(`SELECT COUNT(*) AS n FROM analysis_records${where}`).get(...params) as
-    | { n: number }
-    | undefined;
-  return row?.n ?? 0;
+  const row = await queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM analysis_records${where}`,
+    params,
+  );
+  return Number(row?.n ?? 0);
 }

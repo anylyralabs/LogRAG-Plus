@@ -20,16 +20,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Server } from 'node:http';
 
-const testDir = mkdtempSync(join(tmpdir(), 'lograg-server-'));
+import { createTestDb } from './helpers/testdb.ts';
+
+const tdb = await createTestDb();
 
 // ⚠️ 必须在 import 之前设置：config.ts 在模块加载时即读取环境变量。
-process.env['DATA_DIR'] = testDir;
 // 独立运行模式（未配置内部 API）→ fetchLog 快速失败，不产生网络请求
 process.env['LOGSHARE_INTERNAL_URL'] = '';
 process.env['LOGSHARE_PUBLIC_API_URL'] = '';
@@ -41,9 +39,10 @@ process.env['AI_MODEL'] = 'stub-model';
 process.env['QUOTA_ROUNDS_PER_SESSION'] = '3';
 
 const { createHttpServer } = await import('../src/server/index.ts');
-const { appendMessage, closeStore, findOrCreateSession, getHistory } = await import(
-  '../src/store/session.ts'
-);
+const { appendMessage, findOrCreateSession, getHistory } = await import('../src/store/session.ts');
+const { migrate } = await import('../src/store/migrate.ts');
+const { closePool } = await import('../src/store/mysql.ts');
+if (tdb.ok) await migrate();
 
 let server: Server;
 let origin = '';
@@ -62,8 +61,8 @@ test.after(async () => {
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });
-  closeStore();
-  rmSync(testDir, { recursive: true, force: true });
+  await closePool();
+  await tdb.dispose();
 });
 
 /** 原始 HTTP GET（用于发送 fetch 会改写/拒绝的畸形路径） */
@@ -133,9 +132,9 @@ test('会话回放：不存在的会话返回 404', async () => {
 });
 
 test('会话回放：返回消息与轮次余量', async () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', '第一条问题');
-  appendMessage(s.id, 'assistant', '第一条回答', '思维链内容');
+  const s = await findOrCreateSession(null, 3600);
+  await appendMessage(s.id, 'user', '第一条问题');
+  await appendMessage(s.id, 'assistant', '第一条回答', { reasoning: '思维链内容' });
 
   const res = await fetch(`${origin}/v1/session/${encodeURIComponent(s.id)}`);
   assert.equal(res.status, 200);
@@ -160,15 +159,15 @@ test('会话回放：返回消息与轮次余量', async () => {
 });
 
 test('会话回放：自评摘要随消息返回（刷新后自检面板不丢）', async () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', '为什么崩溃？');
-  appendMessage(s.id, 'assistant', '根因是…', '推理', {
+  const s = await findOrCreateSession(null, 3600);
+  await appendMessage(s.id, 'user', '为什么崩溃？');
+  await appendMessage(s.id, 'assistant', '根因是…', { reasoning: '推理', score: {
     overall: 88,
     deliverable: true,
     dimensions: { grounding: 76, verification: 100, actionability: 80, economy: 100 },
     deductions: ['有 2 条断言缺少可核实标识'],
     missingAnchors: ['libGL.so'],
-  });
+  } });
 
   const res = await fetch(`${origin}/v1/session/${encodeURIComponent(s.id)}`);
   const body = (await res.json()) as {
@@ -217,23 +216,23 @@ test('会话回放：会话 ID 为空返回 400', async () => {
 // ── 缺陷 1：sessionId 必须被读取 ────────────────────────
 
 test('对话：显式 sessionId 被复用（消息落到该会话）', async () => {
-  const s = findOrCreateSession(null, 3600);
-  const before = getHistory(s.id).length;
+  const s = await findOrCreateSession(null, 3600);
+  const before = (await getHistory(s.id)).length;
 
   // 带 logId 但不带正文 → 会在「取日志」处 404 提前返回，
   // 从而不触发任何模型调用，但会话与用户消息的副作用已经发生。
   const res = await postChat({ message: '第二轮追问', sessionId: s.id, logId: '1WiQ8HE' });
   assert.equal(res.status, 404);
 
-  const after = getHistory(s.id);
+  const after = await getHistory(s.id);
   assert.equal(after.length, before + 1, '用户消息应落到传入的会话');
   assert.equal(after[after.length - 1]?.content, '第二轮追问');
 });
 
 test('对话：未知 sessionId 不被采纳，原会话不受影响', async () => {
-  const s = findOrCreateSession(null, 3600);
-  appendMessage(s.id, 'user', '原会话消息');
-  const before = getHistory(s.id).length;
+  const s = await findOrCreateSession(null, 3600);
+  await appendMessage(s.id, 'user', '原会话消息');
+  const before = (await getHistory(s.id)).length;
 
   const res = await postChat({
     message: '不应落到原会话',
@@ -242,7 +241,7 @@ test('对话：未知 sessionId 不被采纳，原会话不受影响', async () 
   });
   assert.equal(res.status, 404);
 
-  const after = getHistory(s.id);
+  const after = await getHistory(s.id);
   assert.equal(after.length, before, '未知 sessionId 不应把消息写进别的会话');
 });
 
@@ -274,9 +273,9 @@ test('对话：非法日志 ID 也能明确报错', async () => {
 // ── 缺陷 4：轮次上限来自配置 ────────────────────────────
 
 test('对话：轮次超限返回 429，且上限来自配置（QUOTA_ROUNDS_PER_SESSION=3）', async () => {
-  const s = findOrCreateSession(null, 3600);
+  const s = await findOrCreateSession(null, 3600);
   for (let i = 0; i < 3; i++) {
-    appendMessage(s.id, 'user', `第 ${i} 轮`);
+    await appendMessage(s.id, 'user', `第 ${i} 轮`);
   }
 
   const res = await postChat({ message: '第四轮', sessionId: s.id });

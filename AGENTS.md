@@ -35,17 +35,24 @@
 
 ## 数据边界（核心原则）
 
-| 数据 | 归属 | 本服务权限 |
-|---|---|---|
-| 日志正文 / 附件 / 元数据 | MariaDB | **只读**（专用只读账号 `lograg_ro`） |
-| 会话 / 消息 / 上传副本 | 自有 SQLite | 读写 |
-| 自定义供应商配置 | 自有 SQLite | 读写（key 加密存储） |
-| RAG 索引 | 自有 SQLite | 读写（本服务构建） |
-| 缓存 / 配额 | Redis `agent:*` | 读写（前缀隔离） |
+**同一个 MariaDB 实例、两个库**，权限严格分开：
 
-**为什么 Node 不写 MariaDB**：LogShare 的写入路径含五个不可绕过的机制——12 个 Filter
-脱敏链、SpinYarn 反混淆（PHP C 扩展）、xxh128 去重指纹、EventQueue 安全审核、分区回收。
-Node 复现成本高且会绕过安全边界。**所有写入走 PHP，Node 只读。**
+| 库 | 权限 | 内容 | TTL |
+|---|---|---|---|
+| `lograg` | **读写** | 会话、消息、日志正文与**追加段**、分析记录、领域知识 | 日志/会话 48 小时 |
+| `logshare` | **只读** | 导入的日志正文 | 7 天（跟 LogShare） |
+
+- **追加永远只写 `lograg`**，LogShare 一行不写。
+- 两个库默认同实例（共用 `DB_HOST`/`DB_PORT`），但**可完全独立部署**：
+  改 `DB_HOST` / `DB_NAME` 即可；分处不同实例时用 `LOGSHARE_DB_*` 单独覆盖。
+- **SQLite 已彻底移除**（2026-10 架构改革）。RAG 索引 `index.db` 仍用 SQLite——
+  那是只读构建产物，与业务数据无关。
+- **本服务的上传不做脱敏**（用户决定）：很少分享整个会话，而脱敏会改写原始日志
+  （行号偏移、内容失真）影响判断。风险由 48 小时 TTL 与访问控制兜底。
+  **日志导入路径的脱敏仍由 LogShare 完成**——两条路径的隐私语义不同，不要混为一谈。
+
+`logshare` 库连不上时，导入日志改走公网只读 API 兜底；这是降级而非失败，
+因为追加段仍在本库、分析仍可进行。`lograg` 库连不上则写操作失败（与任何数据库服务一样）。
 
 ## 目录结构
 
@@ -329,6 +336,13 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
   「输入编号 / 上传 / 粘贴」三件套已从首屏移除，收进输入区。
 - 追问（`ask_user`）必须可恢复：`status` 帧 `type=ask` → `done.asks` → 消息
   `meta.asks` 落库三级通道；「已回答」由**其后是否出现用户消息**判定，不设额外状态。
+  追问的呈现位置是**输入框正上方**（`AskDock`，与输入框同宽）——它需要用户回答，
+  就不该盖住用户要用来回答的输入框。
+- 消息内的顺序是**调查步骤 → 思维链 → 正文 → 结论 → 自检**（真实时间顺序）。
+  调查步骤与思维链**是两个独立面板，不聚合**：步骤是「可枚举的动作」，输出中一次只
+  显示当前一个完整步骤（带「第 N / M 步」）；思维链是「连续自由文本」，用固定高度的
+  窗口内部自动滚动。混在一起时长思维链会把步骤挤出视野。
+- 自检压到一行浅灰小字，无边框无徽章。
 
 ## 环境适配（踩坑记录）
 
@@ -442,7 +456,8 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（32 个文件 369 项）
+npm test                    # 全部单元测试（33 个文件 382 项）
+npm run web:test            # 前端 vitest（11 个文件 167 项）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
 bash scripts/restart.sh     # 重启服务（等端口释放 + 等 READY + 校验 /health，不靠 sleep 猜）
@@ -467,7 +482,7 @@ python3 scripts/analyze_scores.py   # 生产语料评分复核（读 data/corpus
 **前端测试与后端测试是两套**：
 ```bash
 npm test              # 后端 node:test（tests/*.test.ts）
-npm run web:test      # 前端 vitest（web/tests/*.test.ts）
+npm run web:test      # 前端 vitest（web/tests/*.test.ts，11 文件 167 项）
 npm run web:typecheck # vue-tsc
 ```
 

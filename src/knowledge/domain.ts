@@ -43,7 +43,7 @@
  */
 
 import { domainKnowledge as cfg } from '../config.ts';
-import { getDb, registerMigration, withTransaction } from '../store/db.ts';
+import { query, queryOne, transaction } from '../store/mysql.ts';
 
 export interface DomainKnowledge {
   id: string;
@@ -86,39 +86,10 @@ export interface MutationResult {
 
 // ── 表结构 ───────────────────────────────────────────────
 
-registerMigration('010_domain_knowledge', (conn) => {
-  conn.exec(`CREATE TABLE IF NOT EXISTS domain_knowledge (
-    id TEXT PRIMARY KEY,
-    content TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    priority INTEGER NOT NULL DEFAULT 0,
-    tags TEXT NOT NULL DEFAULT '',
-    kind TEXT NOT NULL DEFAULT 'unclear',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  )`);
-
-  conn.exec('CREATE INDEX IF NOT EXISTS idx_dk_enabled ON domain_knowledge(enabled, priority DESC)');
-
-  /**
-   * 变更留痕。
-   *
-   * 领域知识会**直接影响所有分析结论**，属于高危配置项。LogShare 把这类改动写进
-   * 高危操作审计日志；这里把「改了什么、谁改的」与其放在同库，便于回溯
-   * 「某天的分析为什么突然变了」。
-   */
-  conn.exec(`CREATE TABLE IF NOT EXISTS domain_knowledge_audit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    entry_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    before_content TEXT,
-    after_content TEXT,
-    actor TEXT NOT NULL DEFAULT '',
-    at INTEGER NOT NULL
-  )`);
-
-  conn.exec('CREATE INDEX IF NOT EXISTS idx_dka_at ON domain_knowledge_audit(at DESC)');
-});
+/*
+ * 表结构由 `src/store/migrate.ts` 统一管理（MariaDB）。
+ * 原先这里的 SQLite `registerMigration` 已移除——两处建表必然漂移。
+ */
 
 interface Row {
   id: string;
@@ -266,8 +237,7 @@ export interface ListOptions {
 }
 
 /** 列出条目（按优先级降序、更新时间降序） */
-export function listDomainKnowledge(options: ListOptions = {}): DomainKnowledge[] {
-  const conn = getDb();
+export async function listDomainKnowledge(options: ListOptions = {}): Promise<DomainKnowledge[]> {
   const where: string[] = [];
   const params: Array<string | number> = [];
 
@@ -290,16 +260,17 @@ export function listDomainKnowledge(options: ListOptions = {}): DomainKnowledge[
 
   if (options.limit !== undefined) params.push(options.limit);
 
-  const rows = conn.prepare(sql).all(...params) as unknown as Row[];
+  const rows = await query<Row>(sql, params);
   return rows.map(toEntry);
 }
 
 /** 取单条 */
-export function getDomainKnowledge(id: string): DomainKnowledge | null {
-  const row = getDb().prepare('SELECT * FROM domain_knowledge WHERE id = ?').get(id) as unknown as
-    | Row
-    | undefined;
-  return row === undefined ? null : toEntry(row);
+export async function getDomainKnowledge(id: string): Promise<DomainKnowledge | null> {
+  // `queryOne` 查不到时返回 **null**（不是 undefined）。这里踩过：原写
+  // `row === undefined` 判断失效，`toEntry(null)` 直接抛「Cannot read properties of null」，
+  // 表现为「查不存在的条目返回 500 而不是 404」。
+  const row = await queryOne<Row>('SELECT * FROM domain_knowledge WHERE id = ?', [id]);
+  return row === null ? null : toEntry(row);
 }
 
 export interface DomainKnowledgeStats {
@@ -319,14 +290,13 @@ export interface DomainKnowledgeStats {
 }
 
 /** 统计（供 Admin 面板） */
-export function domainKnowledgeStats(): DomainKnowledgeStats {
-  const all = listDomainKnowledge();
+export async function domainKnowledgeStats(): Promise<DomainKnowledgeStats> {
+  const all = await listDomainKnowledge();
+  const injection = await renderDomainKnowledgeSection();
   const byTag: Record<string, number> = {};
   for (const e of all) {
     for (const t of e.tags) byTag[t] = (byTag[t] ?? 0) + 1;
   }
-
-  const injection = renderDomainKnowledgeSection();
 
   return {
     total: all.length,
@@ -374,11 +344,11 @@ function validateContent(raw: string): { ok: true; content: string } | { ok: fal
 }
 
 /** 检查是否与既有条目重复 */
-function findDuplicate(content: string, excludeId?: string): DomainKnowledge | null {
+async function findDuplicate(content: string, excludeId?: string): Promise<DomainKnowledge | null> {
   const target = normalizeForDedup(content);
   if (target === '') return null;
 
-  for (const existing of listDomainKnowledge()) {
+  for (const existing of await listDomainKnowledge()) {
     if (excludeId !== undefined && existing.id === excludeId) continue;
     if (normalizeForDedup(existing.content) === target) return existing;
   }
@@ -386,11 +356,11 @@ function findDuplicate(content: string, excludeId?: string): DomainKnowledge | n
 }
 
 /** 新建条目 */
-export function createDomainKnowledge(input: CreateInput): MutationResult {
+export async function createDomainKnowledge(input: CreateInput): Promise<MutationResult> {
   const v = validateContent(input.content);
   if (!v.ok) return { ok: false, error: v.error };
 
-  const dup = findDuplicate(v.content);
+  const dup = await findDuplicate(v.content);
   if (dup !== null) {
     return { ok: false, error: `与既有条目重复（${dup.id}）：${dup.content}` };
   }
@@ -409,13 +379,10 @@ export function createDomainKnowledge(input: CreateInput): MutationResult {
     updatedAt: now,
   };
 
-  const conn = getDb();
-  withTransaction(conn, () => {
-    conn
-      .prepare(
-        'INSERT INTO domain_knowledge (id, content, enabled, priority, tags, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(
+  await transaction(async (conn) => {
+    await conn.execute(
+      'INSERT INTO domain_knowledge (id, content, enabled, priority, tags, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
         entry.id,
         entry.content,
         entry.enabled ? 1 : 0,
@@ -424,8 +391,9 @@ export function createDomainKnowledge(input: CreateInput): MutationResult {
         entry.kind,
         entry.createdAt,
         entry.updatedAt,
-      );
-    writeAudit(conn, entry.id, 'create', null, entry.content, input.actor ?? '');
+      ],
+    );
+    await writeAudit(conn, entry.id, 'create', null, entry.content, input.actor ?? '');
   });
 
   return { ok: true, entry, warnings: analysis.warnings };
@@ -441,8 +409,8 @@ export interface UpdateInput {
 }
 
 /** 更新条目 */
-export function updateDomainKnowledge(id: string, input: UpdateInput): MutationResult {
-  const existing = getDomainKnowledge(id);
+export async function updateDomainKnowledge(id: string, input: UpdateInput): Promise<MutationResult> {
+  const existing = await getDomainKnowledge(id);
   if (existing === null) return { ok: false, error: '条目不存在' };
 
   let content = existing.content;
@@ -453,7 +421,7 @@ export function updateDomainKnowledge(id: string, input: UpdateInput): MutationR
     if (!v.ok) return { ok: false, error: v.error };
     content = v.content;
 
-    const dup = findDuplicate(content, id);
+    const dup = await findDuplicate(content, id);
     if (dup !== null) {
       return { ok: false, error: `与既有条目重复（${dup.id}）：${dup.content}` };
     }
@@ -475,13 +443,10 @@ export function updateDomainKnowledge(id: string, input: UpdateInput): MutationR
     updatedAt: nowSeconds(),
   };
 
-  const conn = getDb();
-  withTransaction(conn, () => {
-    conn
-      .prepare(
-        'UPDATE domain_knowledge SET content = ?, enabled = ?, priority = ?, tags = ?, kind = ?, updated_at = ? WHERE id = ?',
-      )
-      .run(
+  await transaction(async (conn) => {
+    await conn.execute(
+      'UPDATE domain_knowledge SET content = ?, enabled = ?, priority = ?, tags = ?, kind = ?, updated_at = ? WHERE id = ?',
+      [
         next.content,
         next.enabled ? 1 : 0,
         next.priority,
@@ -489,40 +454,39 @@ export function updateDomainKnowledge(id: string, input: UpdateInput): MutationR
         next.kind,
         next.updatedAt,
         id,
-      );
-    writeAudit(conn, id, 'update', existing.content, next.content, input.actor ?? '');
+      ],
+    );
+    await writeAudit(conn, id, 'update', existing.content, next.content, input.actor ?? '');
   });
 
   return { ok: true, entry: next, warnings };
 }
 
 /** 删除条目 */
-export function removeDomainKnowledge(id: string, actor = ''): MutationResult {
-  const existing = getDomainKnowledge(id);
+export async function removeDomainKnowledge(id: string, actor = ''): Promise<MutationResult> {
+  const existing = await getDomainKnowledge(id);
   if (existing === null) return { ok: false, error: '条目不存在' };
 
-  const conn = getDb();
-  withTransaction(conn, () => {
-    conn.prepare('DELETE FROM domain_knowledge WHERE id = ?').run(id);
-    writeAudit(conn, id, 'delete', existing.content, null, actor);
+  await transaction(async (conn) => {
+    await conn.execute('DELETE FROM domain_knowledge WHERE id = ?', [id]);
+    await writeAudit(conn, id, 'delete', existing.content, null, actor);
   });
 
   return { ok: true, entry: existing };
 }
 
-function writeAudit(
-  conn: ReturnType<typeof getDb>,
+async function writeAudit(
+  conn: { execute: (sql: string, params?: any[]) => Promise<unknown> },
   entryId: string,
   action: string,
   before: string | null,
   after: string | null,
   actor: string,
-): void {
-  conn
-    .prepare(
-      'INSERT INTO domain_knowledge_audit (entry_id, action, before_content, after_content, actor, at) VALUES (?, ?, ?, ?, ?, ?)',
-    )
-    .run(entryId, action, before, after, actor, nowSeconds());
+): Promise<void> {
+  await conn.execute(
+    'INSERT INTO domain_knowledge_audit (entry_id, action, before_content, after_content, actor, at) VALUES (?, ?, ?, ?, ?, ?)',
+    [entryId, action, before, after, actor, nowSeconds()],
+  );
 }
 
 export interface AuditRecord {
@@ -536,11 +500,9 @@ export interface AuditRecord {
 }
 
 /** 变更留痕（倒序） */
-export function domainKnowledgeAudit(limit = 50): AuditRecord[] {
+export async function domainKnowledgeAudit(limit = 50): Promise<AuditRecord[]> {
   const cap = Math.max(1, Math.min(limit, 500));
-  const rows = getDb()
-    .prepare('SELECT * FROM domain_knowledge_audit ORDER BY id DESC LIMIT ?')
-    .all(cap) as unknown as Array<{
+  const rows = (await query<{
     id: number;
     entry_id: string;
     action: string;
@@ -548,7 +510,7 @@ export function domainKnowledgeAudit(limit = 50): AuditRecord[] {
     after_content: string | null;
     actor: string;
     at: number;
-  }>;
+  }>('SELECT * FROM domain_knowledge_audit ORDER BY id DESC LIMIT ?', [cap]));
 
   return rows.map((r) => ({
     id: r.id,
@@ -572,8 +534,11 @@ export function domainKnowledgeAudit(limit = 50): AuditRecord[] {
  * 中文没有空格分词，故同时按**字符二元组**匹配——「渲染器」能命中
  * 「渲染器兼容性」这类连续文本。这是覆盖率的折中，不是精确分词。
  */
-export function searchDomainKnowledge(query: string, limit = 20): DomainKnowledge[] {
-  const all = listDomainKnowledge({ enabledOnly: true });
+export async function searchDomainKnowledge(
+  query: string,
+  limit = 20,
+): Promise<DomainKnowledge[]> {
+  const all = await listDomainKnowledge({ enabledOnly: true });
   const q = query.trim().toLowerCase();
 
   if (q === '') return all.slice(0, limit);
@@ -646,12 +611,12 @@ export interface Injection {
  *     「已知领域知识就这些」从而过度自信；列出来它就知道还有没看到的部分，
  *     可以去调 `expert_knowledge` 检索。
  */
-export function renderDomainKnowledgeSection(): Injection {
+export async function renderDomainKnowledgeSection(): Promise<Injection> {
   if (!cfg.enabled) {
     return { injected: [], skipped: [], text: '', chars: 0 };
   }
 
-  const all = listDomainKnowledge({ enabledOnly: true });
+  const all = await listDomainKnowledge({ enabledOnly: true });
   const eligible = all.filter((e) => e.priority >= cfg.injectMinPriority);
   const lowPriority = all.filter((e) => e.priority < cfg.injectMinPriority);
 

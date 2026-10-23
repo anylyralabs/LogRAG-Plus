@@ -18,16 +18,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Server } from 'node:http';
 
-const testDir = mkdtempSync(join(tmpdir(), 'lograg-dk-'));
+import { createTestDb } from './helpers/testdb.ts';
 
-// ⚠️ 必须在 import 之前设置：config.ts 的部分字段在模块加载时即固化
-process.env['DATA_DIR'] = testDir;
+// 建隔离库并覆盖 DB_NAME —— 必须在导入 config.ts 之前完成
+const tdb = await createTestDb();
+
 // 小预算：便于用少量条目触发截断分支
 process.env['DOMAIN_KNOWLEDGE_BUDGET_CHARS'] = '300';
 // 注入门槛设为 5：priority < 5 的条目只可检索、不进提示词
@@ -45,7 +43,9 @@ const {
   searchDomainKnowledge,
   updateDomainKnowledge,
 } = await import('../src/knowledge/domain.ts');
-const { closeDb } = await import('../src/store/db.ts');
+const { migrate } = await import('../src/store/migrate.ts');
+const { closePool } = await import('../src/store/mysql.ts');
+if (tdb.ok) await migrate();
 const { buildTools, createToolContext } = await import('../src/agent/tools/index.ts');
 const { createHttpServer } = await import('../src/server/index.ts');
 
@@ -66,8 +66,8 @@ test.after(async () => {
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });
-  closeDb();
-  rmSync(testDir, { recursive: true, force: true });
+  await closePool();
+  await tdb.dispose();
 });
 
 interface Res {
@@ -107,30 +107,30 @@ function call(
 }
 
 /** 清空全部条目（测试间互不影响） */
-function clearAll(): void {
-  for (const e of listDomainKnowledge()) removeDomainKnowledge(e.id, 'test');
+async function clearAll(): Promise<void> {
+  for (const e of await listDomainKnowledge()) await removeDomainKnowledge(e.id, 'test');
 }
 
 // ── 一、条目性质判定 ─────────────────────────────────────
 
-test('性质判定：能力不可能的断言被判为事实性先验', () => {
+test('性质判定：能力不可能的断言被判为事实性先验', async () => {
   const a = classifyEntry('Mali 系 GPU 在 MC 26.2+ 仍不支持 Vulkan 启动，只能走 GL4ES 或 Krypton。');
   assert.equal(a.kind, 'fact');
 });
 
-test('性质判定：条件→动作句式被判为方法论并给出提醒', () => {
+test('性质判定：条件→动作句式被判为方法论并给出提醒', async () => {
   const a = classifyEntry('如果最大日志文件没有超过 6000 行，可直接阅读全文，不再使用检索工具。');
   assert.equal(a.kind, 'method');
   assert.ok(a.warnings.length > 0, '应给出提醒');
   assert.match(a.warnings.join('\n'), /方法论/);
 });
 
-test('性质判定：多行内容会被提醒破坏列表结构', () => {
+test('性质判定：多行内容会被提醒破坏列表结构', async () => {
   const a = classifyEntry('第一行事实断言：某渲染器不支持某扩展。\n第二行也是。');
   assert.match(a.warnings.join('\n'), /换行/);
 });
 
-test('性质判定：Markdown 标题与具体路径会被提醒', () => {
+test('性质判定：Markdown 标题与具体路径会被提醒', async () => {
   const a = classifyEntry('## 结论\n某 GPU 无法运行该特性，见 /storage/emulated/0/a。');
   const joined = a.warnings.join('\n');
   assert.match(joined, /Markdown 标题/);
@@ -139,49 +139,49 @@ test('性质判定：Markdown 标题与具体路径会被提醒', () => {
 
 // ── 二、写入边界 ─────────────────────────────────────────
 
-test('创建：空内容被拒', () => {
-  const r = createDomainKnowledge({ content: '   ' });
+test('创建：空内容被拒', async () => {
+  const r = await createDomainKnowledge({ content: '   ' });
   assert.equal(r.ok, false);
   assert.match(r.error ?? '', /不能为空/);
 });
 
-test('创建：超过 200 字被拒并报出实际字数', () => {
-  const r = createDomainKnowledge({ content: '啊'.repeat(201) });
+test('创建：超过 200 字被拒并报出实际字数', async () => {
+  const r = await createDomainKnowledge({ content: '啊'.repeat(201) });
   assert.equal(r.ok, false);
   assert.match(r.error ?? '', /201 字/);
 });
 
-test('创建：多行/多空白被压成单行', () => {
-  clearAll();
-  const r = createDomainKnowledge({ content: '  某 GPU   不支持\n该特性。  ' });
+test('创建：多行/多空白被压成单行', async () => {
+  await clearAll();
+  const r = await createDomainKnowledge({ content: '  某 GPU   不支持\n该特性。  ' });
   assert.equal(r.ok, true);
   assert.equal(r.entry?.content, '某 GPU 不支持 该特性。');
 });
 
-test('创建：仅标点不同的重复条目被拒', () => {
-  clearAll();
-  const first = createDomainKnowledge({ content: 'Mali GPU 不支持 Vulkan 启动。' });
+test('创建：仅标点不同的重复条目被拒', async () => {
+  await clearAll();
+  const first = await createDomainKnowledge({ content: 'Mali GPU 不支持 Vulkan 启动。' });
   assert.equal(first.ok, true);
 
-  const second = createDomainKnowledge({ content: 'Mali GPU 不支持 Vulkan 启动' });
+  const second = await createDomainKnowledge({ content: 'Mali GPU 不支持 Vulkan 启动' });
   assert.equal(second.ok, false);
   assert.match(second.error ?? '', /重复/);
 });
 
-test('创建：方法论条目只提醒不拦截（返回 warnings 且已落库）', () => {
-  clearAll();
-  const r = createDomainKnowledge({
+test('创建：方法论条目只提醒不拦截（返回 warnings 且已落库）', async () => {
+  await clearAll();
+  const r = await createDomainKnowledge({
     content: '如果日志超过 6000 行就优先使用检索工具，不要直接读取全文。',
   });
   assert.equal(r.ok, true);
   assert.equal(r.entry?.kind, 'method');
   assert.ok((r.warnings ?? []).length > 0);
-  assert.equal(listDomainKnowledge().length, 1, '应已落库——提醒不等于拦截');
+  assert.equal((await listDomainKnowledge()).length, 1, '应已落库——提醒不等于拦截');
 });
 
-test('创建：kindOverride 可显式豁免误判', () => {
-  clearAll();
-  const r = createDomainKnowledge({
+test('创建：kindOverride 可显式豁免误判', async () => {
+  await clearAll();
+  const r = await createDomainKnowledge({
     content: '如果看到 Mojang 认证 401 就直接忽略，那是噪音。',
     kindOverride: 'fact',
   });
@@ -191,15 +191,15 @@ test('创建：kindOverride 可显式豁免误判', () => {
 
 // ── 三、更新与删除 ───────────────────────────────────────
 
-test('更新：不存在返回错误', () => {
-  const r = updateDomainKnowledge('dk_nope', { content: 'x' });
+test('更新：不存在返回错误', async () => {
+  const r = await updateDomainKnowledge('dk_nope', { content: 'x' });
   assert.equal(r.ok, false);
   assert.match(r.error ?? '', /不存在/);
 });
 
-test('更新：改内容后重新判定性质并留痕', () => {
-  clearAll();
-  const created = createDomainKnowledge({
+test('更新：改内容后重新判定性质并留痕', async () => {
+  await clearAll();
+  const created = await createDomainKnowledge({
     content: '某渲染器 26.3 起改用 SDL3。',
     priority: 10,
     tags: ['renderer'],
@@ -207,7 +207,7 @@ test('更新：改内容后重新判定性质并留痕', () => {
   const id = created.entry?.id ?? '';
   assert.notEqual(id, '');
 
-  const updated = updateDomainKnowledge(id, {
+  const updated = await updateDomainKnowledge(id, {
     content: '如果遇到渲染问题就优先检查 SDL3。',
     actor: 'tester',
   });
@@ -216,31 +216,31 @@ test('更新：改内容后重新判定性质并留痕', () => {
   assert.deepEqual(updated.entry?.tags, ['renderer'], '未传 tags 时应保持原值');
   assert.equal(updated.entry?.priority, 10);
 
-  const audit = domainKnowledgeAudit(10);
+  const audit = await domainKnowledgeAudit(10);
   assert.equal(audit[0]?.action, 'update');
   assert.equal(audit[0]?.actor, 'tester');
 });
 
-test('更新：改成与其它条目重复被拒', () => {
-  clearAll();
-  const a = createDomainKnowledge({ content: '特征一：完全不同的内容甲。' });
-  createDomainKnowledge({ content: '特征二：完全不同的内容乙。' });
+test('更新：改成与其它条目重复被拒', async () => {
+  await clearAll();
+  const a = await createDomainKnowledge({ content: '特征一：完全不同的内容甲。' });
+  await createDomainKnowledge({ content: '特征二：完全不同的内容乙。' });
 
-  const r = updateDomainKnowledge(a.entry?.id ?? '', { content: '特征二：完全不同的内容乙。' });
+  const r = await updateDomainKnowledge(a.entry?.id ?? '', { content: '特征二：完全不同的内容乙。' });
   assert.equal(r.ok, false);
   assert.match(r.error ?? '', /重复/);
 });
 
-test('删除：条目消失但留痕保留', () => {
-  clearAll();
-  const created = createDomainKnowledge({ content: '即将被删除的一条先验事实断言。' });
+test('删除：条目消失但留痕保留', async () => {
+  await clearAll();
+  const created = await createDomainKnowledge({ content: '即将被删除的一条先验事实断言。' });
   const id = created.entry?.id ?? '';
 
-  const removed = removeDomainKnowledge(id, 'tester');
+  const removed = await removeDomainKnowledge(id, 'tester');
   assert.equal(removed.ok, true);
-  assert.equal(getDomainKnowledge(id), null);
+  assert.equal(await getDomainKnowledge(id), null);
 
-  const audit = domainKnowledgeAudit(10);
+  const audit = await domainKnowledgeAudit(10);
   assert.equal(audit[0]?.action, 'delete');
   assert.equal(audit[0]?.beforeContent, '即将被删除的一条先验事实断言。');
   assert.equal(audit[0]?.afterContent, null);
@@ -248,12 +248,12 @@ test('删除：条目消失但留痕保留', () => {
 
 // ── 四、注入 ─────────────────────────────────────────────
 
-test('注入：低于优先级门槛的条目不注入，但被显式列在跳过提示里', () => {
-  clearAll();
-  createDomainKnowledge({ content: '高优先级的先验事实断言一，说明某能力不可用。', priority: 10 });
-  createDomainKnowledge({ content: '低优先级的先验事实断言二，说明某行为是噪音。', priority: 1 });
+test('注入：低于优先级门槛的条目不注入，但被显式列在跳过提示里', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '高优先级的先验事实断言一，说明某能力不可用。', priority: 10 });
+  await createDomainKnowledge({ content: '低优先级的先验事实断言二，说明某行为是噪音。', priority: 1 });
 
-  const inj = renderDomainKnowledgeSection();
+  const inj = await renderDomainKnowledgeSection();
   assert.equal(inj.injected.length, 1);
   assert.equal(inj.skipped.length, 1);
   assert.match(inj.text, /权威先验/);
@@ -261,99 +261,99 @@ test('注入：低于优先级门槛的条目不注入，但被显式列在跳�
   assert.match(inj.text, /expert_knowledge/, '应引导模型去检索');
 });
 
-test('注入：超出预算的条目被截断且计入 skipped', () => {
-  clearAll();
+test('注入：超出预算的条目被截断且计入 skipped', async () => {
+  await clearAll();
   for (let i = 0; i < 10; i++) {
-    createDomainKnowledge({
+    await createDomainKnowledge({
       content: `第 ${i} 条先验事实：某设备在特定版本下无法运行某特性，需改用替代方案。`,
       priority: 10,
     });
   }
 
-  const inj = renderDomainKnowledgeSection();
+  const inj = await renderDomainKnowledgeSection();
   assert.ok(inj.injected.length > 0, '至少注入一条');
   assert.ok(inj.injected.length < 10, '预算 300 字装不下 10 条');
   assert.ok(inj.skipped.length > 0);
   assert.ok(inj.chars <= 300, `注入字符数 ${inj.chars} 不应超过预算`);
 });
 
-test('注入：按优先级降序排列', () => {
-  clearAll();
-  createDomainKnowledge({ content: '优先级较低的一条先验事实断言甲。', priority: 6 });
-  createDomainKnowledge({ content: '优先级较高的一条先验事实断言乙。', priority: 20 });
+test('注入：按优先级降序排列', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '优先级较低的一条先验事实断言甲。', priority: 6 });
+  await createDomainKnowledge({ content: '优先级较高的一条先验事实断言乙。', priority: 20 });
 
-  const inj = renderDomainKnowledgeSection();
+  const inj = await renderDomainKnowledgeSection();
   assert.match(inj.injected[0]?.content ?? '', /乙/, '高优先级应排在前面');
 });
 
-test('注入：无启用条目时返回空串而不是空标题（避免提示词出现空小节）', () => {
-  clearAll();
-  const inj = renderDomainKnowledgeSection();
+test('注入：无启用条目时返回空串而不是空标题（避免提示词出现空小节）', async () => {
+  await clearAll();
+  const inj = await renderDomainKnowledgeSection();
   assert.equal(inj.text, '');
   assert.equal(inj.chars, 0);
 });
 
 // ── 五、检索（expert_knowledge 工具的数据面）──────────────
 
-test('检索：中文二元组能命中（无分词器也能用）', () => {
-  clearAll();
-  createDomainKnowledge({ content: '移动端渲染器对帧缓冲格式支持不全，需降级处理。', priority: 10 });
-  createDomainKnowledge({ content: '某加载器在26.3 起改用新映射格式。', priority: 10 });
+test('检索：中文二元组能命中（无分词器也能用）', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '移动端渲染器对帧缓冲格式支持不全，需降级处理。', priority: 10 });
+  await createDomainKnowledge({ content: '某加载器在26.3 起改用新映射格式。', priority: 10 });
 
-  const hits = searchDomainKnowledge('渲染器', 10);
+  const hits = await searchDomainKnowledge('渲染器', 10);
   assert.equal(hits.length, 1);
   assert.match(hits[0]?.content ?? '', /渲染器/);
 });
 
-test('检索：标签命中加权', () => {
-  clearAll();
-  createDomainKnowledge({ content: '甲条先验事实断言，内容不含英文标签词。', tags: ['gpu'], priority: 10 });
-  createDomainKnowledge({ content: '乙条先验事实断言，内容同样不含标签词。', tags: ['other'], priority: 10 });
+test('检索：标签命中加权', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '甲条先验事实断言，内容不含英文标签词。', tags: ['gpu'], priority: 10 });
+  await createDomainKnowledge({ content: '乙条先验事实断言，内容同样不含标签词。', tags: ['other'], priority: 10 });
 
-  const hits = searchDomainKnowledge('gpu', 10);
+  const hits = await searchDomainKnowledge('gpu', 10);
   assert.equal(hits.length, 1);
   assert.match(hits[0]?.content ?? '', /甲条/);
 });
 
-test('检索：空查询返回全部启用条目', () => {
-  clearAll();
-  createDomainKnowledge({ content: '启用的先验事实断言甲。', priority: 10 });
-  createDomainKnowledge({ content: '启用的先验事实断言乙。', priority: 10 });
-  createDomainKnowledge({ content: '停用的先验事实断言丙。', enabled: false, priority: 10 });
+test('检索：空查询返回全部启用条目', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '启用的先验事实断言甲。', priority: 10 });
+  await createDomainKnowledge({ content: '启用的先验事实断言乙。', priority: 10 });
+  await createDomainKnowledge({ content: '停用的先验事实断言丙。', enabled: false, priority: 10 });
 
-  const hits = searchDomainKnowledge('', 10);
+  const hits = await searchDomainKnowledge('', 10);
   assert.equal(hits.length, 2, '停用条目不应被检索到');
 });
 
-test('检索：无命中返回空数组（而非报错）', () => {
-  clearAll();
-  createDomainKnowledge({ content: '关于帧缓冲的先验事实断言。', priority: 10 });
-  assert.deepEqual(searchDomainKnowledge('完全不相干的词xyz', 10), []);
+test('检索：无命中返回空数组（而非报错）', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '关于帧缓冲的先验事实断言。', priority: 10 });
+  assert.deepEqual(await searchDomainKnowledge('完全不相干的词xyz', 10), []);
 });
 
 // ── 六、工具注册 ─────────────────────────────────────────
 
-test('工具：无领域知识条目不注册 expert_knowledge（避免空工具占位诱导调用）', () => {
-  clearAll();
-  const names = buildTools(createToolContext(null, null)).map((t) => t.name);
+test('工具：无领域知识条目不注册 expert_knowledge（避免空工具占位诱导调用）', async () => {
+  await clearAll();
+  const names = (await buildTools(createToolContext(null, null))).map((t) => t.name);
   assert.ok(!names.includes('expert_knowledge'));
 });
 
-test('工具：有启用条目时注册 expert_knowledge', () => {
-  clearAll();
-  createDomainKnowledge({ content: '存在一条先验事实断言，用于触发工具注册。', priority: 10 });
-  const names = buildTools(createToolContext(null, null)).map((t) => t.name);
+test('工具：有启用条目时注册 expert_knowledge', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '存在一条先验事实断言，用于触发工具注册。', priority: 10 });
+  const names = (await buildTools(createToolContext(null, null))).map((t) => t.name);
   assert.ok(names.includes('expert_knowledge'));
 });
 
 // ── 七、统计 ─────────────────────────────────────────────
 
-test('统计：区分事实与方法论条目（便于发现该挪去 prompts/ 的内容）', () => {
-  clearAll();
-  createDomainKnowledge({ content: '某设备无法运行某特性，这是已知限制。', priority: 10 });
-  createDomainKnowledge({ content: '如果日志太长就优先用检索工具，不要通读。', priority: 10 });
+test('统计：区分事实与方法论条目（便于发现该挪去 prompts/ 的内容）', async () => {
+  await clearAll();
+  await createDomainKnowledge({ content: '某设备无法运行某特性，这是已知限制。', priority: 10 });
+  await createDomainKnowledge({ content: '如果日志太长就优先用检索工具，不要通读。', priority: 10 });
 
-  const s = domainKnowledgeStats();
+  const s = await domainKnowledgeStats();
   assert.equal(s.total, 2);
   assert.equal(s.enabled, 2);
   assert.equal(s.methodLike, 1);
@@ -408,7 +408,7 @@ test('管理接口：Bearer 形态同样可用', async () => {
 });
 
 test('管理接口：analyze 只试算不落库', async () => {
-  clearAll();
+  await clearAll();
   const res = await call('/v1/admin/domain-knowledge/analyze', 'POST', {
     content: '如果日志超过 6000 行就优先检索，不要通读。',
   }, AUTH);
@@ -416,11 +416,11 @@ test('管理接口：analyze 只试算不落库', async () => {
   const body = JSON.parse(res.body) as { kind: string; warnings: string[]; chars: number };
   assert.equal(body.kind, 'method');
   assert.ok(body.warnings.length > 0);
-  assert.equal(listDomainKnowledge().length, 0, '试算不得落库');
+  assert.equal((await listDomainKnowledge()).length, 0, '试算不得落库');
 });
 
 test('管理接口：创建 → 列表 → 更新 → 删除 全链路', async () => {
-  clearAll();
+  await clearAll();
 
   const created = await call('/v1/admin/domain-knowledge', 'POST', {
     content: '管理接口写入的先验事实断言，说明某能力不可用。',
@@ -446,7 +446,7 @@ test('管理接口：创建 → 列表 → 更新 → 删除 全链路', async (
 
   const removed = await call(`/v1/admin/domain-knowledge/${id}`, 'DELETE', undefined, AUTH);
   assert.equal(removed.status, 200);
-  assert.equal(listDomainKnowledge().length, 0);
+  assert.equal((await listDomainKnowledge()).length, 0);
 });
 
 test('管理接口：写入门禁覆盖所有子路由（未带 Token 一律 401）', async () => {
@@ -470,9 +470,9 @@ test('管理接口：写入门禁覆盖所有子路由（未带 Token 一律 401
 });
 
 test('管理接口：injection 端点回显真实注入原文（含跳过提示）', async () => {
-  clearAll();
-  createDomainKnowledge({ content: '注入预览用的一条先验事实断言。', priority: 10 });
-  createDomainKnowledge({ content: '低优先级的一条先验事实断言。', priority: 1 });
+  await clearAll();
+  await createDomainKnowledge({ content: '注入预览用的一条先验事实断言。', priority: 10 });
+  await createDomainKnowledge({ content: '低优先级的一条先验事实断言。', priority: 1 });
 
   const res = await call('/v1/admin/domain-knowledge/injection', 'GET', undefined, AUTH);
   assert.equal(res.status, 200);
@@ -489,8 +489,8 @@ test('管理接口：injection 端点回显真实注入原文（含跳过提示�
 });
 
 test('管理接口：audit 端点返回变更留痕', async () => {
-  clearAll();
-  createDomainKnowledge({ content: '留痕测试用的先验事实断言一条。' });
+  await clearAll();
+  await createDomainKnowledge({ content: '留痕测试用的先验事实断言一条。' });
 
   const res = await call('/v1/admin/domain-knowledge/audit?limit=5', 'GET', undefined, AUTH);
   assert.equal(res.status, 200);

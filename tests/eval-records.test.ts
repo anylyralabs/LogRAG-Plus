@@ -7,7 +7,7 @@
  * 100 上限的分页接口——统计口径静默退化，且**没有任何报错**。
  *
  * 因此这里有一条硬性回归：
- * **写入 150 条记录后，`analysisStats()` 必须报告 total = 150、sampled = 150。**
+ * **写入 150 条记录后，`await analysisStats()` 必须报告 total = 150、sampled = 150。**
  * 如果这条挂了，说明聚合又走了分页上限。
  *
  * 另外守两组边界：
@@ -16,15 +16,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Server } from 'node:http';
 
-const testDir = mkdtempSync(join(tmpdir(), 'lograg-records-'));
+import { createTestDb } from './helpers/testdb.ts';
 
-process.env['DATA_DIR'] = testDir;
+const tdb = await createTestDb();
+
 process.env['RECORDS_MAX_PAGE_SIZE'] = '100';
 process.env['RECORDS_MAX_AGGREGATE_ROWS'] = '20000';
 process.env['RECORDS_RETENTION_DAYS'] = '2';
@@ -38,7 +36,9 @@ const {
   purgeAnalysisRecords,
   saveAnalysisRecord,
 } = await import('../src/eval/records.ts');
-const { closeDb } = await import('../src/store/db.ts');
+const { migrate } = await import('../src/store/migrate.ts');
+const { closePool } = await import('../src/store/mysql.ts');
+if (tdb.ok) await migrate();
 const { createHttpServer } = await import('../src/server/index.ts');
 
 let server: Server;
@@ -54,8 +54,8 @@ test.before(async () => {
 
 test.after(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  closeDb();
-  rmSync(testDir, { recursive: true, force: true });
+  await closePool();
+  await tdb.dispose();
 });
 
 interface Res {
@@ -137,9 +137,9 @@ const fakeConclusion = {
   strategy: 'fenced-json',
 };
 
-function seed(n: number, base = 80): void {
+async function seed(n: number, base = 80): Promise<void> {
   for (let i = 0; i < n; i++) {
-    saveAnalysisRecord({
+    await saveAnalysisRecord({
       sessionId: `sess-${i}`,
       logId: i % 2 === 0 ? `log${i}` : null,
       provider: 'http://127.0.0.1:8765/v1',
@@ -158,9 +158,9 @@ function seed(n: number, base = 80): void {
 
 // ── 一、写入与读取 ───────────────────────────────────────
 
-test('写入后可取回，字段完整', () => {
-  const before = countAnalysisRecords();
-  const id = saveAnalysisRecord({
+test('写入后可取回，字段完整', async () => {
+  const before = await countAnalysisRecords();
+  const id = await saveAnalysisRecord({
     sessionId: 'sess-x',
     logId: 'log-x',
     provider: 'http://127.0.0.1:8765/v1',
@@ -176,9 +176,9 @@ test('写入后可取回，字段完整', () => {
     ],
   });
 
-  assert.equal(countAnalysisRecords(), before + 1);
+  assert.equal(await countAnalysisRecords(), before + 1);
 
-  const r = getAnalysisRecord(id);
+  const r = await getAnalysisRecord(id);
   assert.ok(r !== null);
   assert.equal(r.overall, 91);
   assert.equal(r.logId, 'log-x');
@@ -196,60 +196,60 @@ test('写入后可取回，字段完整', () => {
   assert.equal(r.deliverable, true);
 });
 
-test('取回不存在的记录返回 null（而非抛错）', () => {
-  assert.equal(getAnalysisRecord('ar_nope'), null);
+test('取回不存在的记录返回 null（而非抛错）', async () => {
+  assert.equal(await getAnalysisRecord('ar_nope'), null);
 });
 
 // ── 二、分页与过滤边界 ───────────────────────────────────
 
-test('分页上限被夹到 maxPageSize（HTTP 层无法一次读全表）', () => {
-  const before = countAnalysisRecords();
-  seed(130, 70);
-  assert.ok(countAnalysisRecords() >= before + 130);
+test('分页上限被夹到 maxPageSize（HTTP 层无法一次读全表）', async () => {
+  const before = await countAnalysisRecords();
+  await seed(130, 70);
+  assert.ok(await countAnalysisRecords() >= before + 130);
 
-  const rows = listAnalysisRecords({ limit: 100_000 });
+  const rows = await listAnalysisRecords({ limit: 100_000 });
   assert.equal(rows.length, 100, '应为 maxPageSize 而非请求值');
 });
 
-test('过滤：分数区间、deliverable、logId 都能生效', () => {
-  const low = listAnalysisRecords({ maxScore: 74, limit: 100 });
+test('过滤：分数区间、deliverable、logId 都能生效', async () => {
+  const low = await listAnalysisRecords({ maxScore: 74, limit: 100 });
   assert.ok(low.length > 0);
   assert.ok(low.every((r) => r.overall <= 74));
 
-  const notDeliverable = listAnalysisRecords({ deliverable: false, limit: 100 });
+  const notDeliverable = await listAnalysisRecords({ deliverable: false, limit: 100 });
   assert.ok(notDeliverable.every((r) => r.deliverable === false));
 
-  const byLog = listAnalysisRecords({ logId: 'log0', limit: 10 });
+  const byLog = await listAnalysisRecords({ logId: 'log0', limit: 10 });
   assert.ok(byLog.every((r) => r.logId === 'log0'));
 });
 
-test('排序字段是白名单：任意字符串不会进入 SQL', () => {
+test('排序字段是白名单：任意字符串不会进入 SQL', async () => {
   // 若白名单失效，这里会直接抛 SQL 语法错误
-  const rows = listAnalysisRecords({
+  const rows = await listAnalysisRecords({
     orderBy: 'overall; DROP TABLE analysis_records' as never,
     limit: 5,
   });
   assert.ok(Array.isArray(rows));
-  assert.ok(countAnalysisRecords() > 0, '表必须还在');
+  assert.ok(await countAnalysisRecords() > 0, '表必须还在');
 });
 
-test('排序：overall 升序取到最低分', () => {
-  const rows = listAnalysisRecords({ orderBy: 'overall', ascending: true, limit: 3 });
+test('排序：overall 升序取到最低分', async () => {
+  const rows = await listAnalysisRecords({ orderBy: 'overall', ascending: true, limit: 3 });
   assert.equal(rows.length, 3);
   assert.ok(rows[0]!.overall <= rows[1]!.overall);
 });
 
-test('筛选后的 total 必须与列表同集合（不能永远返回全表条数）', () => {
-  const all = countAnalysisRecords();
+test('筛选后的 total 必须与列表同集合（不能永远返回全表条数）', async () => {
+  const all = await countAnalysisRecords();
   assert.ok(all > 0);
 
-  const lowRows = listAnalysisRecords({ maxScore: 74, limit: 100 });
-  const lowTotal = countAnalysisRecordsMatching({ maxScore: 74 });
+  const lowRows = await listAnalysisRecords({ maxScore: 74, limit: 100 });
+  const lowTotal = await countAnalysisRecordsMatching({ maxScore: 74 });
   assert.equal(lowTotal, lowRows.length, 'total 应等于筛选结果数（样本未超过分页上限）');
   assert.ok(lowTotal < all, '该筛选应筛掉一部分记录，否则本用例失去意义');
 
   // 不带条件时与全表计数一致
-  assert.equal(countAnalysisRecordsMatching(), all);
+  assert.equal(await countAnalysisRecordsMatching(), all);
 });
 
 test('返回 total 的接口也遵守筛选条件（HTTP 层回归）', async () => {
@@ -263,28 +263,28 @@ test('返回 total 的接口也遵守筛选条件（HTTP 层回归）', async ()
   const body = JSON.parse(filtered.body) as { records: unknown[]; total: number };
 
   assert.equal(body.records.length, 1);
-  assert.equal(body.total, countAnalysisRecordsMatching({ maxScore: 74 }));
-  assert.ok(body.total < countAnalysisRecords(), '筛后的 total 不应等于全表');
+  assert.equal(body.total, await countAnalysisRecordsMatching({ maxScore: 74 }));
+  assert.ok(body.total < await countAnalysisRecords(), '筛后的 total 不应等于全表');
 });
 
 // ── 三、聚合（核心回归：不得退化为「最近 N 条」）───────────
 
-test('回归：聚合统计覆盖全量样本，不受分页上限影响', () => {
-  const before = countAnalysisRecords();
-  seed(150, 60);
+test('回归：聚合统计覆盖全量样本，不受分页上限影响', async () => {
+  const before = await countAnalysisRecords();
+  await seed(150, 60);
 
   const expected = before + 150;
-  assert.equal(countAnalysisRecords(), expected);
+  assert.equal(await countAnalysisRecords(), expected);
 
-  const s = analysisStats();
+  const s = await analysisStats();
   assert.equal(s.total, expected, 'total 必须是全量条数');
   assert.equal(s.sampled, expected, 'sampled 不能被 100 的分页上限截断');
   assert.equal(s.truncated, false);
   assert.ok(s.avgOverall !== null);
 });
 
-test('聚合：各维度均值与分桶正确', () => {
-  const s = analysisStats();
+test('聚合：各维度均值与分桶正确', async () => {
+  const s = await analysisStats();
   assert.equal(s.dimensions.verification, 70);
   assert.equal(s.dimensions.actionability, 60);
   assert.equal(s.dimensions.economy, 90);
@@ -294,13 +294,13 @@ test('聚合：各维度均值与分桶正确', () => {
   assert.equal(bucketTotal, s.sampled, '各分数桶之和应等于样本数');
 });
 
-test('聚合：维度全为 null 时给出 null 而不是 0（未采集与计数为零必须可区分）', () => {
-  const before = countAnalysisRecords();
+test('聚合：维度全为 null 时给出 null 而不是 0（未采集与计数为零必须可区分）', async () => {
+  const before = await countAnalysisRecords();
   // 清空后只留一条 grounding = null 的记录
-  for (const r of listAnalysisRecords({ limit: 100 })) {
+  for (const r of await listAnalysisRecords({ limit: 100 })) {
     void r;
   }
-  saveAnalysisRecord({
+  await saveAnalysisRecord({
     sessionId: 'sess-null',
     logId: null,
     provider: 'p',
@@ -314,13 +314,13 @@ test('聚合：维度全为 null 时给出 null 而不是 0（未采集与计数
 
   // 用模型过滤无法裁剪聚合，故这里直接检查全局均值里 grounding 仍有值即可，
   // 关键是 null 不会被算成 0 —— 单独校验一次「全是 null」的边界由下一条覆盖
-  const s = analysisStats();
+  const s = await analysisStats();
   assert.ok(s.dimensions.grounding !== null, `grounding 均值不应为 null（有非 null 样本），实际 ${s.dimensions.grounding}`);
   assert.ok(s.sampled >= before + 1 - 1);
 });
 
-test('聚合：扣分理由按「去掉数字后」的形态归并计数', () => {
-  const s = analysisStats();
+test('聚合：扣分理由按「去掉数字后」的形态归并计数', async () => {
+  const s = await analysisStats();
   assert.ok(Array.isArray(s.topDeductions));
   // 失败原因若按原样计数，同一类缺陷会因数字不同被拆成多项
   for (const d of s.topDeductions) {
@@ -328,8 +328,8 @@ test('聚合：扣分理由按「去掉数字后」的形态归并计数', () =>
   }
 });
 
-test('聚合：byModel 给出各模型的样本数与均值', () => {
-  const s = analysisStats();
+test('聚合：byModel 给出各模型的样本数与均值', async () => {
+  const s = await analysisStats();
   assert.ok(Object.keys(s.byModel).length > 0);
   for (const [, v] of Object.entries(s.byModel)) {
     assert.ok(v.count > 0);
@@ -337,9 +337,9 @@ test('聚合：byModel 给出各模型的样本数与均值', () => {
   }
 });
 
-test('聚合：空表返回全 null 而不是零值（没有数据与数据都是 0 是两回事）', () => {
+test('聚合：空表返回全 null 而不是零值（没有数据与数据都是 0 是两回事）', async () => {
   // 用一个极早的 since 过滤出空集
-  const s = analysisStats(Math.floor(Date.now() / 1000) + 86400);
+  const s = await analysisStats(Math.floor(Date.now() / 1000) + 86400);
   assert.equal(s.total, 0);
   assert.equal(s.sampled, 0);
   assert.equal(s.avgOverall, null);
@@ -349,14 +349,14 @@ test('聚合：空表返回全 null 而不是零值（没有数据与数据都�
 
 // ── 四、清理 ─────────────────────────────────────────────
 
-test('清理：只删超过保留期的记录', () => {
-  const s = analysisStats();
+test('清理：只删超过保留期的记录', async () => {
+  const s = await analysisStats();
   assert.ok(s.total > 0);
 
   // 保留期 2 天 → 刚刚写入的记录必须保留
-  const deleted = purgeAnalysisRecords();
+  const deleted = await purgeAnalysisRecords();
   assert.equal(deleted, 0, '刚写入的记录不应被判定为过期');
-  assert.equal(countAnalysisRecords(), s.total);
+  assert.equal(await countAnalysisRecords(), s.total);
 });
 
 // ── 五、管理接口 ─────────────────────────────────────────
@@ -408,7 +408,7 @@ test('管理接口：列表、统计、单条、删除全链路', async () => {
 
   const del = await call(`/v1/admin/records/${id}`, 'DELETE', undefined, AUTH);
   assert.equal(del.status, 200);
-  assert.equal(getAnalysisRecord(id), null);
+  assert.equal(await getAnalysisRecord(id), null);
 
   const gone = await call(`/v1/admin/records/${id}`, 'GET', undefined, AUTH);
   assert.equal(gone.status, 404);

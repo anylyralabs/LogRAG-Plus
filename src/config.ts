@@ -172,16 +172,71 @@ export const logshare = {
   },
 };
 
-/** MariaDB 只读连接（lograg_ro 账号，仅 SELECT 权限） */
+/**
+ * MariaDB：**同一个实例、两个库**。
+ *
+ * - `lograg`（读写）：本服务自己的会话、日志正文、追加段、分析记录、领域知识。
+ * - `logshare`（只读）：导入的日志正文，跟随 LogShare 的 7 天 TTL。
+ *
+ * 两个库默认在**同一个实例**上（共用 `DB_HOST` / `DB_PORT`），但账号与库名分开：
+ * 本服务对 `logshare` 只需要 SELECT，对 `lograg` 需要读写。
+ *
+ * **可完全独立部署**：把 `DB_HOST` 指向另一个实例、`DB_NAME` 改成别的库名即可，
+ * 代码不假设任何具体实例或库名。两个库分处不同实例时，用
+ * `LOGSHARE_DB_HOST` / `LOGSHARE_DB_PORT` 单独覆盖 LogShare 那一侧。
+ */
 export const db = {
   host: env('DB_HOST', ''),
   port: envInt('DB_PORT', 3306),
-  user: env('DB_USER', 'lograg_ro'),
+  user: env('DB_USER', 'lograg'),
   password: env('DB_PASSWORD', ''),
-  database: env('DB_NAME', 'logshare'),
+  database: env('DB_NAME', 'lograg'),
   connectionLimit: envInt('DB_POOL_SIZE', 4),
   get enabled(): boolean {
-    return this.host !== '';
+    return db.host !== '';
+  },
+};
+
+/**
+ * LogShare 库（只读）。
+ *
+ * 主机/端口默认继承 `DB_HOST` / `DB_PORT`（同实例不同库），可单独覆盖。
+ * 未配置或连不上时，导入日志改走公网只读 API 兜底——这是**降级**而不是失败：
+ * 追加段仍在本库，分析仍可进行。
+ */
+export const logshareDb = {
+  host: env('LOGSHARE_DB_HOST', env('DB_HOST', '')),
+  port: envInt('LOGSHARE_DB_PORT', envInt('DB_PORT', 3306)),
+  user: env('LOGSHARE_DB_USER', 'lograg_ro'),
+  password: env('LOGSHARE_DB_PASSWORD', env('DB_PASSWORD', '')),
+  database: env('LOGSHARE_DB_NAME', 'logshare'),
+  connectionLimit: envInt('LOGSHARE_DB_POOL_SIZE', 2),
+  get enabled(): boolean {
+    return logshareDb.host !== '';
+  },
+};
+
+/**
+ * SpinYarn 反混淆（可选）。
+ *
+ * 走 C ABI 直调（koffi），与 LogShare 共用同一份 mappings 目录；
+ * 配了 `SPINYARN_REDIS_URL` 时还共用同一个 Redis 缓存
+ * （缓存键由库内部决定，同 mappings + 同 URL 即自然共享）。
+ *
+ * 任一项缺失即整体禁用，分析流程不受影响（反混淆是增强，不是前置条件）。
+ */
+export const logshareDeobf = {
+  /** C ABI 动态库路径，如 `/app/mappings/libspinyarn_capi.so` */
+  soPath: env('SPINYARN_SO', ''),
+  /** mappings 目录（`*.tiny.gz`），与 LogShare 配置一致 */
+  mappingsDir: env('SPINYARN_MAPPINGS_DIR', ''),
+  /** Redis URL；空 = on-demand（无共享缓存） */
+  redisUrl: env('SPINYARN_REDIS_URL', ''),
+  cacheMax: envInt('SPINYARN_CACHE_MAX', 10),
+  cacheHigh: envInt('SPINYARN_CACHE_HIGH', 10),
+  cacheLow: envInt('SPINYARN_CACHE_LOW', 7),
+  get enabled(): boolean {
+    return logshareDeobf.soPath !== '' && logshareDeobf.mappingsDir !== '';
   },
 };
 

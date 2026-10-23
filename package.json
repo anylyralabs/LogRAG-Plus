@@ -13,14 +13,22 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:test": "npm --prefix web run test",
+    "web:typecheck": "npm --prefix web run typecheck",
+    "build:all": "npm run web:build && npm run build"
   },
   "dependencies": {
     "@langchain/core": "^1.2.14",
     "@langchain/langgraph": "^1.4.10",
     "@langchain/openai": "^1.6.2",
     "deepagents": "^1.15.0",
+    "koffi": "^3.3.3",
     "langchain": "^1.5.10",
+    "mysql2": "^3.24.6",
     "zod": "^4.3.6"
   },
   "devDependencies": {

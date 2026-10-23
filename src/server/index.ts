@@ -26,7 +26,9 @@ import {
   getSession,
   sessionTtlSeconds,
 } from '../store/session.ts';
-import { fetchLog, uploadLog } from '../logshare/client.ts';
+import { deobfuscate } from '../agent/deobfuscate.ts';
+import { appendSegment, putBase } from '../store/logbody.ts';
+import { resolveLogContent } from './logSource.ts';
 import { isValidLogId } from '../logshare/id.ts';
 import {
   classifyEntry,
@@ -52,7 +54,7 @@ import {
   saveAnalysisRecord,
 } from '../eval/records.ts';
 import type { RecordFilter } from '../eval/records.ts';
-import { getDb } from '../store/db.ts';
+import { execute } from '../store/mysql.ts';
 import { extractConclusion } from '../agent/structured.ts';
 
 /** 请求体大小上限（10MB 日志 + JSON 包装余量） */
@@ -189,7 +191,15 @@ function countLinesOf(text: string): number {
  *    界面据此说明「面板只显示前 2MB」，而不是悄悄少几行让用户以为日志就这么长。
  */
 async function handleLog(res: ServerResponse, logId: string, refresh = false): Promise<void> {
-  if (!isValidLogId(logId)) {
+  /*
+   * 接受两种 ID：
+   *  - LogShare 的七位日志 ID（导入的日志）
+   *  - 本服务的会话 ID（`s` + 时间戳 + 随机串，native 日志的归属单位）
+   *
+   * 会话 ID 是本次架构改革后的主形态：URL `/s/{sessionId}`，正文存在本库。
+   */
+  const isSessionId = /^s[a-z0-9]{8,}$/.test(logId);
+  if (!isSessionId && !isValidLogId(logId)) {
     json(res, 400, { ok: false, error: '日志 ID 格式非法' });
     return;
   }
@@ -203,11 +213,12 @@ async function handleLog(res: ServerResponse, logId: string, refresh = false): P
     return;
   }
 
-  const fetched = await fetchLog(logId);
-  if (!fetched.ok || fetched.content === undefined || fetched.content === '') {
+  // 统一解析：本地主日志优先（native），LogShare 兜底（导入），追加段自动合并
+  const resolved = await resolveLogContent(logId);
+  if (!resolved.ok) {
     json(res, 404, {
       ok: false,
-      error: fetched.error ?? '未能读取该日志（可能已过期）。',
+      error: resolved.error ?? '未能读取该日志（可能已过期）。',
     });
     return;
   }
@@ -235,19 +246,22 @@ async function handleLog(res: ServerResponse, logId: string, refresh = false): P
     });
   };
 
-  push('main.log', fetched.content);
-  for (const f of fetched.files ?? []) {
+  push('main.log', resolved.content);
+  for (const f of resolved.files ?? []) {
     if (typeof f.data === 'string' && f.data !== '') push(f.name, f.data);
   }
 
   const payload = {
     ok: true,
     logId,
-    source: fetched.source ?? '',
-    createdAt: fetched.createdAt ?? 0,
-    maybeObfuscating: fetched.maybeObfuscating ?? false,
+    source: resolved.source ?? '',
+    createdAt: 0,
+    maybeObfuscating: false,
     docs,
     omitted,
+    // 追加段数量与「原日志过期」提示：界面据此说明「你看到的不只是原件」
+    appended: resolved.appended,
+    ...(resolved.note !== undefined ? { note: resolved.note } : {}),
   };
 
   if (logCache.size >= LOG_CACHE_MAX) {
@@ -268,14 +282,14 @@ async function handleLog(res: ServerResponse, logId: string, refresh = false): P
  * 只返回展示所需字段：思维链一并返回（前端「深度分析」面板要展示推理过程），
  * 但不返回内部计数器等实现细节。
  */
-function handleSession(res: ServerResponse, sessionId: string): void {
-  const session = getSession(sessionId);
+async function handleSession(res: ServerResponse, sessionId: string): Promise<void> {
+  const session = await getSession(sessionId);
   if (session === null) {
     json(res, 404, { ok: false, error: '会话不存在或已过期' });
     return;
   }
 
-  const messages = getHistory(session.id, 200).map((m) => ({
+  const messages = (await getHistory(session.id, 200)).map((m) => ({
     role: m.role,
     content: m.content,
     ...(m.reasoning !== null && m.reasoning !== '' ? { reasoning: m.reasoning } : {}),
@@ -293,7 +307,7 @@ function handleSession(res: ServerResponse, sessionId: string): void {
       expiresAt: session.expiresAt,
     },
     // 轮次余量：前端据此提示「本会话还剩 N 轮」
-    rounds: checkRoundsAllowed(session.id),
+    rounds: await checkRoundsAllowed(session.id),
     messages,
   });
 }
@@ -345,12 +359,12 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   const providedSessionId =
     typeof body.sessionId === 'string' && body.sessionId.trim() !== '' ? body.sessionId.trim() : '';
 
-  let session = providedSessionId !== '' ? getSession(providedSessionId) : null;
+  let session = providedSessionId !== '' ? await getSession(providedSessionId) : null;
   if (session === null) {
     // 未传或已过期：在**同一主体内**按 logId 复用/新建。
     // 显式 sessionId 走的是 bearer 语义（知道 ID 即可回放），这是无登录产品
     // 支持「换设备继续」的必要取舍；但自动复用不能跨人。
-    session = findOrCreateSession(logId, sessionTtlSeconds(logId), anonId);
+    session = await findOrCreateSession(logId, sessionTtlSeconds(logId), anonId);
   }
 
   // 会话已绑定的日志优先——客户端延续会话时可省略 logId，
@@ -358,7 +372,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   const effectiveLogId = logId ?? session.logId;
 
   // 轮次上限检查
-  const rounds = checkRoundsAllowed(session.id);
+  const rounds = await checkRoundsAllowed(session.id);
   if (!rounds.allowed) {
     json(res, 429, {
       ok: false,
@@ -370,7 +384,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   // 历史消息（多轮上下文）
-  const history = getHistory(session.id, 20).map((m) => ({
+  const history = (await getHistory(session.id, 20)).map((m) => ({
     role: m.role,
     content: m.content,
   }));
@@ -381,7 +395,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   // 但 tests/server.test.ts 明确覆盖了该行为：显式 sessionId 的请求即使因
   // 日志取不到而 404，用户消息仍要落到该会话（保证客户端重试时上下文连续）。
   // 若要改成「失败不留痕」，必须同时改掉那条测试与轮次口径，不能只改一处。
-  appendMessage(session.id, 'user', body.message);
+  await appendMessage(session.id, 'user', body.message);
 
   // 日志正文来源判定：显式正文优先；只给 ID 时稍后自动取回
   const providedContent =
@@ -459,25 +473,22 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let sourceNote: string | undefined;
 
   if (logContent === null && effectiveLogId !== null) {
-    const fetched = await fetchLog(effectiveLogId);
+    // 统一解析：本地主日志优先，LogShare 兜底，追加段自动合并
+    const resolved = await resolveLogContent(effectiveLogId);
 
-    if (!fetched.ok || fetched.content === undefined || fetched.content === '') {
+    if (!resolved.ok) {
       json(res, 404, {
         ok: false,
         sessionId: session.id,
         error:
-          fetched.error ??
+          resolved.error ??
           '未能读取该日志（可能已过期）。请重新上传，或直接把日志内容粘贴进来分析。',
       });
       return;
     }
 
-    logContent = fetched.content;
-
-    // 反混淆是 LogShare 的异步事件队列任务，刚落库的日志可能尚未处理完
-    if (fetched.maybeObfuscating === true) {
-      sourceNote = '该日志刚落库，LogShare 的异步反混淆可能尚未完成；若结果异常请稍后重试。';
-    }
+    logContent = resolved.content;
+    if (resolved.note !== undefined) sourceNote = resolved.note;
   }
 
   // 日志窗口处理
@@ -568,21 +579,18 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         result.asks.length > 0 ? { asks: result.asks } : undefined;
 
       // 记录助手回复（含思维链、自评与结构化附加信息，供后续轮次与回溯）
-      appendMessage(
-        session.id,
-        'assistant',
-        result.content,
-        result.reasoning,
-        scoreSummary,
-        messageMeta,
-      );
+      await appendMessage(session.id, 'assistant', result.content, {
+        reasoning: result.reasoning,
+        score: scoreSummary,
+        meta: messageMeta,
+      });
 
       // 落分析记录 + 看板数据。
       // 记录失败绝不能影响用户拿到答案——它是观测，不是交付路径。
       let recordId: string | null = null;
       try {
         if (result.score !== undefined) {
-          recordId = saveAnalysisRecord({
+          recordId = await saveAnalysisRecord({
             sessionId: session.id,
             logId: effectiveLogId,
             provider: provider.baseUrl,
@@ -634,27 +642,127 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
 }
 
 /**
+ * 追加日志到既有会话（`POST /v1/session/{id}/append`）。
+ *
+ * ## 语义
+ *
+ * 往同一份排障材料里补一段（如先给了 `latest.log`，后来找到崩溃报告）。
+ * 追加段按 `seq` 递增插入，**不改动已有内容**；读取时按顺序合并。
+ *
+ * ## 为什么按会话而不是日志 ID
+ *
+ * 本服务不生成自有日志 ID——会话就是归属单位（前端 URL 是 `/s/{sessionId}`）。
+ * LogShare 导入的会话（`log_kind='logshare'`）同样可以追加：
+ * 基础正文留在 LogShare，**追加段只写本库**，这一条是刻意的。
+ *
+ * ## 配额
+ *
+ * 与上传共用 `upload` 配额：追加同样消耗存储与带宽。
+ */
+async function handleAppend(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  if (sessionId === '') {
+    json(res, 400, { ok: false, error: '缺少会话 ID' });
+    return;
+  }
+
+  const session = await getSession(sessionId);
+  if (session === null) {
+    json(res, 404, { ok: false, error: '会话不存在或已过期' });
+    return;
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readBody(req));
+  } catch (e) {
+    json(res, 400, {
+      ok: false,
+      error: `请求解析失败：${e instanceof Error ? e.message : String(e)}`,
+    });
+    return;
+  }
+
+  const clientIp = resolveClientIp({
+    remoteAddress: req.socket.remoteAddress,
+    headers: req.headers as Record<string, string | string[] | undefined>,
+    trustedProxies: security.trustedProxies,
+  });
+  const fingerprint =
+    raw !== null && typeof raw === 'object' && typeof (raw as { fingerprint?: unknown }).fingerprint === 'string'
+      ? ((raw as { fingerprint: string }).fingerprint)
+      : undefined;
+  const anonId = anonymousId(clientIp, String(req.headers['user-agent'] ?? ''), fingerprint);
+  const quota = await consume('upload', anonId, clientIp);
+
+  if (!quota.allowed) {
+    res.setHeader('retry-after', String(secondsUntilTomorrow()));
+    json(res, 429, {
+      ok: false,
+      error: '今日追加次数已用完，请明天再试。',
+      retryAfterSeconds: secondsUntilTomorrow(),
+    });
+    return;
+  }
+
+  const validated = validateUpload(raw);
+  if (!validated.ok) {
+    json(res, 400, { ok: false, error: validated.error, remaining: quota.remaining });
+    return;
+  }
+
+  // 追加段同样反混淆（fail-open）
+  const deob = deobfuscate(validated.value.content);
+
+  const appended = await appendSegment(session.id, {
+    content: deob.text,
+    files: validated.value.files.length > 0 ? validated.value.files : null,
+    source: validated.value.source !== '' ? validated.value.source : null,
+  });
+
+  if (isDev) {
+    console.log(
+      `[append] session=${session.id} seq=${appended.seq} total=${appended.total} ` +
+        `deobf=${deob.changed}`,
+    );
+  }
+
+  json(res, 200, {
+    ok: true,
+    sessionId: session.id,
+    seq: appended.seq,
+    total: appended.total,
+    deobfuscated: deob.changed,
+    ...(deob.error !== undefined ? { deobfuscateError: deob.error } : {}),
+    remaining: quota.remaining,
+  });
+}
+
+/**
  * 处理日志上传（`POST /v1/upload`）。
  *
- * ## 为什么必须经过 LogShare
+ * ## 存储归属（2026-10 架构改革）
  *
- * 上传内容要走 LogShare 的完整写入流水线：脱敏（IPv4/路径/用户名等）→ 去重指纹
- * → 异步反混淆（SpinYarn）→ 异步安全审核 → 分区落库。本服务**不自行落盘**，
- * 因为一旦本地也存一份，就等于多出一条未经脱敏与审核的数据路径——那是最容易
- * 泄露用户日志的地方。
+ * 正文存在**本服务自己的 `lograg` 库**，不再依赖 LogShare 存储。
+ * 这样才可能「往同一份日志追加」（LogShare 的每次写入都会生成新 ID）。
  *
- * ## 为什么本服务还要自己校验一遍
+ * 代价与决定：**本服务的上传不做脱敏**。原因是很少会分享整个会话，
+ * 而脱敏会改写用户原始日志（行号偏移、内容失真），影响排障判断。
+ * 风险由 48 小时 TTL 与访问控制兜底，`AGENTS.md` 有明确记录。
  *
- * LogShare 侧当然也会校验，但：
- *  1. 在跨网转发**之前**拦住，省掉一次 12MB 的白跑；
- *  2. 能给「哪个文件、超了多少」这类可定位的提示，而不是一句笼统的 400；
- *  3. 本服务自己要解析这坨 JSON，不校验就等于放任任意大小的请求体走一遍解析。
+ * ## 反混淆
  *
- * ## 超配额为什么在这里是硬拒（与对话不同）
+ * 上传后立即用 SpinYarn 的 C ABI 反混淆（与 LogShare 共用 mappings 与缓存），
+ * 存进库的就是可读名。**fail-open**：反混淆失败只记状态，绝不阻断上传。
  *
- * 对话超配额降级为「快速模式」，因为用户仍能拿到有价值的答案（CGNAT 场景下
- * 硬拒会误伤真实用户，项目已有此教训）。上传没有可降级的中间态——不能只存一半，
- * 而它又是唯一会消耗存储与边缘带宽的动作，因此这里明确拒绝并给出重试时间。
+ * ## 超配额为什么硬拒（与对话不同）
+ *
+ * 对话超配额降级为「快速模式」，用户仍能拿到有价值的答案（CGNAT 场景下硬拒会
+ * 误伤真实用户）。上传没有可降级的中间态——不能只存一半，而它又是唯一会消耗
+ * 存储与带宽的动作，因此明确拒绝并给出重试时间。
  */
 async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const clientIp = resolveClientIp({
@@ -710,39 +818,40 @@ async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<
     return;
   }
 
-  const uploaded = await uploadLog(validated.value.content, {
-    ...(validated.value.source !== '' ? { source: validated.value.source } : {}),
-    ...(validated.value.files.length > 0 ? { files: validated.value.files } : {}),
-  });
+  /*
+   * 反混淆：识别版本 → 调 SpinYarn C ABI。
+   *
+   * fail-open：失败就用原文，并把状态带给前台（`deobfuscated:false`）。
+   * 反混淆是增强，不能让一个可选组件阻断上传。
+   */
+  const deob = deobfuscate(validated.value.content);
 
-  if (!uploaded.ok || uploaded.id === undefined) {
-    // 502 而非 400：请求本身是合法的，是上游没能完成写入。
-    json(res, 502, {
-      ok: false,
-      error: uploaded.error ?? 'LogShare 未能完成写入',
-      remaining: quota.remaining,
-    });
-    return;
-  }
+  // 建会话并落正文（native：正文完全在本库）
+  const session = await findOrCreateSession(null, sessionTtlSeconds(null), anonId, 'native');
+
+  await putBase(session.id, {
+    content: deob.text,
+    files: validated.value.files.length > 0 ? validated.value.files : null,
+    source: validated.value.source !== '' ? validated.value.source : null,
+  });
 
   if (isDev) {
     console.log(
-      `[upload] ip=${clientIp} id=${uploaded.id} files=${validated.value.files.length} ` +
-        `bytes=${validated.value.content.length}`,
+      `[upload] ip=${clientIp} session=${session.id} files=${validated.value.files.length} ` +
+        `bytes=${validated.value.content.length} deobf=${deob.changed}`,
     );
   }
 
   json(res, 200, {
     ok: true,
-    // 字段名与 API.md 对齐：`logId` 比裸 `id` 更明确（上传响应里还有 token 等其它 ID）。
-    // 历史上这里返回 `id`，而文档与前端都按 `logId` 读取，导致上传成功后跳到
-    // `/undefined`——契约漂移的典型后果，故在服务端这一侧收敛。
-    logId: uploaded.id,
-    maybeObfuscating: true,
-    ...(uploaded.token !== undefined ? { token: uploaded.token } : {}),
+    // 会话 ID 就是访问凭据：URL 形态 `/s/{sessionId}`，不额外生成日志 ID。
+    logId: session.id,
+    deobfuscated: deob.changed,
+    ...(deob.error !== undefined ? { deobfuscateError: deob.error } : {}),
     ...(validated.notes.length > 0 ? { notes: validated.notes } : {}),
     remaining: quota.remaining,
   });
+
 }
 
 // ── 管理接口 ──────────────────────────────────────────────
@@ -849,13 +958,13 @@ async function handleDomainKnowledge(
   if (sub === '' && method === 'GET') {
     const limitRaw = url.searchParams.get('limit');
     const limit = limitRaw === null ? undefined : Number(limitRaw);
-    const entries = listDomainKnowledge({
+    const entries = await listDomainKnowledge({
       enabledOnly: url.searchParams.get('enabledOnly') === '1',
       tag: url.searchParams.get('tag') ?? undefined,
       keyword: url.searchParams.get('keyword') ?? undefined,
       limit: limit !== undefined && Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : undefined,
     });
-    json(res, 200, { ok: true, entries, stats: domainKnowledgeStats() });
+    json(res, 200, { ok: true, entries, stats: await domainKnowledgeStats() });
     return;
   }
 
@@ -865,7 +974,7 @@ async function handleDomainKnowledge(
     if (body === null) return;
 
     const content = typeof body.content === 'string' ? body.content : '';
-    const result = createDomainKnowledge({
+    const result = await createDomainKnowledge({
       content,
       enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
       priority: parsePriority(body.priority),
@@ -900,7 +1009,7 @@ async function handleDomainKnowledge(
     const limit = limitRaw === null ? 50 : Number(limitRaw);
     json(res, 200, {
       ok: true,
-      records: domainKnowledgeAudit(Number.isFinite(limit) ? limit : 50),
+      records: await domainKnowledgeAudit(Number.isFinite(limit) ? limit : 50),
     });
     return;
   }
@@ -908,7 +1017,7 @@ async function handleDomainKnowledge(
   // 查看「实际注入提示词的原文」——这是管理员最需要确认的东西：
   // 自己写的条目到底以什么形态进入模型上下文。
   if (sub === 'injection' && method === 'GET') {
-    const injection = renderDomainKnowledgeSection();
+    const injection = await renderDomainKnowledgeSection();
     json(res, 200, {
       ok: true,
       chars: injection.chars,
@@ -922,7 +1031,7 @@ async function handleDomainKnowledge(
   // 预览 expert_knowledge 工具的返回（验证检索是否命中）
   if (sub === 'search' && method === 'GET') {
     const q = url.searchParams.get('q') ?? '';
-    const hits = searchDomainKnowledge(q, 20);
+    const hits = await searchDomainKnowledge(q, 20);
     json(res, 200, { ok: true, query: q, hits });
     return;
   }
@@ -941,7 +1050,7 @@ async function handleDomainKnowledge(
   }
 
   if (method === 'GET') {
-    const entry = listDomainKnowledge().find((e) => e.id === id);
+    const entry = (await listDomainKnowledge()).find((e) => e.id === id);
     if (entry === undefined) {
       json(res, 404, { ok: false, error: '条目不存在' });
       return;
@@ -954,7 +1063,7 @@ async function handleDomainKnowledge(
     const body = await readJsonBody(req, res);
     if (body === null) return;
 
-    const result = updateDomainKnowledge(id, {
+    const result = await updateDomainKnowledge(id, {
       content: typeof body.content === 'string' ? body.content : undefined,
       enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
       priority: parsePriority(body.priority),
@@ -967,7 +1076,7 @@ async function handleDomainKnowledge(
   }
 
   if (method === 'DELETE') {
-    const result = removeDomainKnowledge(id, adminActor(req));
+    const result = await removeDomainKnowledge(id, adminActor(req));
     json(res, result.ok ? 200 : 404, result);
     return;
   }
@@ -1006,7 +1115,7 @@ async function handleRecords(
   if (sub === 'stats' && method === 'GET') {
     const sinceDays = num('days');
     const since = sinceDays === undefined ? undefined : Math.floor(Date.now() / 1000) - sinceDays * 86400;
-    json(res, 200, { ok: true, stats: analysisStats(since) });
+    json(res, 200, { ok: true, stats: await analysisStats(since) });
     return;
   }
 
@@ -1032,7 +1141,7 @@ async function handleRecords(
       ascending: url.searchParams.get('ascending') === '1',
     };
 
-    const recordsList = listAnalysisRecords({
+    const recordsList = await listAnalysisRecords({
       ...filter,
       limit: num('limit'),
       offset: num('offset'),
@@ -1041,7 +1150,7 @@ async function handleRecords(
     json(res, 200, {
       ok: true,
       records: recordsList,
-      total: countAnalysisRecordsMatching(filter),
+      total: await countAnalysisRecordsMatching(filter),
     });
     return;
   }
@@ -1061,7 +1170,7 @@ async function handleRecords(
     return;
   }
 
-  const record = getAnalysisRecord(id);
+  const record = await getAnalysisRecord(id);
   if (record === null) {
     json(res, 404, { ok: false, error: '记录不存在' });
     return;
@@ -1073,8 +1182,7 @@ async function handleRecords(
   }
 
   if (method === 'DELETE') {
-    const db = getDb();
-    db.prepare('DELETE FROM analysis_records WHERE id = ?').run(id);
+    await execute('DELETE FROM analysis_records WHERE id = ?', [id]);
     json(res, 200, { ok: true, deleted: id });
     return;
   }
@@ -1192,7 +1300,28 @@ export function createHttpServer(): Server {
             json(res, 400, { ok: false, error: '缺少会话 ID' });
             return;
           }
-          handleSession(res, sessionId);
+          await handleSession(res, sessionId);
+          return;
+        }
+
+        /*
+         * 追加日志：`POST /v1/session/{id}/append`
+         *
+         * 这是本次架构改革的核心能力——原先每次上传都会新建一份日志（LogShare 的
+         * 每次写入都生成新 ID），一份排障对话无法分多次补日志。现在正文存在本库，
+         * 追加只是插入一段，会话 ID 不变、URL 不变。
+         */
+        if (path.startsWith('/v1/session/') && path.endsWith('/append') && req.method === 'POST') {
+          let appendSessionId: string;
+          try {
+            appendSessionId = decodeURIComponent(
+              path.slice('/v1/session/'.length, -'/append'.length),
+            );
+          } catch {
+            json(res, 400, { ok: false, error: '会话 ID 编码非法' });
+            return;
+          }
+          await handleAppend(req, res, appendSessionId);
           return;
         }
 
@@ -1247,9 +1376,9 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
  * 清理失败只记日志不抛出——回收是维护动作，不该影响请求处理。
  */
 export function startSessionCleanup(): void {
-  const run = (): void => {
+  const run = async (): Promise<void> => {
     try {
-      const removed = cleanupExpired();
+      const removed = await cleanupExpired();
       if (removed > 0 && isDev) {
         console.log(`[cleanup] 已清理 ${removed} 个过期会话`);
       }
@@ -1258,6 +1387,9 @@ export function startSessionCleanup(): void {
     }
   };
 
-  run(); // 启动时先清一次（进程可能已长时间未重启）
-  setInterval(run, CLEANUP_INTERVAL_MS).unref();
+  // 启动时先清一次（进程可能已长时间未重启）
+  void run();
+  // setInterval 不接受 Promise：直接传 async 函数会产生未处理的 rejection，
+  // 定时器里必须显式 void + 内部 catch（run 自身已 catch）
+  setInterval(() => void run(), CLEANUP_INTERVAL_MS).unref();
 }
