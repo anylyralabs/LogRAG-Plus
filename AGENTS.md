@@ -25,7 +25,7 @@
 主入口：agent.logshare.cn
   ├─ 直接提问              → 纯对话（可用 RAG / GitHub / web 工具）
   ├─ 粘贴日志正文          → 立即分析，不依赖 LogShare
-  └─ 上传日志文件          → 走 LogShare 处理（脱敏 + 反混淆）后分析
+  └─ 上传日志文件          → 存本服务 lograg 库（不脱敏）+ SpinYarn 反混淆后分析
 
 联动入口：logshare.cn/{id}
   → 点击「LogRAG+ 深度分析」→ agent.logshare.cn/logshare/{id}
@@ -84,16 +84,22 @@ src/
 │   ├── anchor.ts          窗口锚点定位（结构性标记优先）
 │   ├── window.ts          窗口提取（多窗口）
 │   └── obfuscation.ts     混淆特征检测（反混淆就绪判定）
-├── store/                 SQLite（会话、消息、迁移登记、分析记录）
-│   ├── server/
-│   │   ├── index.ts         HTTP 服务（路由、配额、SSE 编排）
-│   │   └── static.ts        前端产物托管（/logshare/*，结构性防路径遍历）
-│   └── agent/
-│       ├── model.ts         模型构造（自定义供应商适配）
-│       ├── runner.ts        多轮工具循环（评分在末尾挂上，不影响分析）
-│       ├── prompt.ts        系统提示词拼接（精确工具清单 + 领域知识注入）
-│       ├── structured.ts    结尾结构化 JSON 解析
-│       └── tools/           工具集（log / rag / github / knowledge）
+├── store/                 MariaDB（连接池、迁移、会话、日志正文与追加段）
+│   ├── mysql.ts           连接池与查询封装（query / queryOne / execute / transaction）
+│   ├── migrate.ts         迁移（`lograg_migrations` 记账；先 DDL 后记账，幂等）
+│   ├── session.ts         会话与消息（TTL 区分 native / logshare）
+│   └── logbody.ts         日志正文与追加段（seq=0 主日志，1..n 追加，读取时合并）
+├── server/
+│   ├── index.ts           HTTP 服务（路由、配额、SSE 编排）
+│   ├── logSource.ts       正文解析（本地优先、LogShare 兜底、追加段合并）
+│   └── static.ts          前端产物托管（/logshare/*，结构性防路径遍历）
+├── agent/
+│   ├── model.ts           模型构造（自定义供应商适配）
+│   ├── runner.ts          多轮工具循环（评分在末尾挂上，不影响分析）
+│   ├── prompt.ts          系统提示词拼接（精确工具清单 + 领域知识注入）
+│   ├── structured.ts      结尾结构化 JSON 解析
+│   ├── deobfuscate.ts     SpinYarn C ABI 反混淆（koffi 直调，fail-open）
+│   └── tools/             工具集（log / rag / github / knowledge）
 
 前端 `web/`              Vue 3 + Vite 案卷式 Agent 工作台（详见 web/README.md）
 ├── public/landing.html   官网首页（/ 静态托管，不经 Vue）
@@ -343,6 +349,12 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
   显示当前一个完整步骤（带「第 N / M 步」）；思维链是「连续自由文本」，用固定高度的
   窗口内部自动滚动。混在一起时长思维链会把步骤挤出视野。
 - 自检压到一行浅灰小字，无边框无徽章。
+- **输入区加号 = 给当前会话补材料**：已有会话时走 `POST /v1/session/{id}/append`，
+  不新建会话、不跳转；没有会话时才上传并新建。追加入口只有这一个，
+  侧边案卷不再重复提供。
+- **`session.hasLog` 不能省**：native 上传的会话 `logId` 为 `null`（正文归属会话自身），
+  纯对话被追加过材料后也算有正文。前端据此决定是否加载案卷，只看 `logId` 会让
+  上传后的会话失去日志面板。
 
 ## 环境适配（踩坑记录）
 
@@ -442,7 +454,7 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 
 ### /tmp 只读
 
-临时文件用 `/data/data/com.termux/files/usr/tmp/` 或项目内 `tmp/`。
+临时文件用 `/tmp/` 或项目内 `tmp/`。
 
 ## 技术约束
 
@@ -450,18 +462,22 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 |---|---|
 | **CPU 密集工具必须进 worker 线程** | 实测：10MB 日志 grep 导致事件循环停顿 **1423ms**。`readLog`/`grepLog` 必须用 `worker_threads` |
 | **`node:sqlite` 可直接复用 RAG 索引** | 实测：Node 24 内置 SQLite 3.53.0 与 PHP `pdo_sqlite` 版本一致，FTS5 / `bm25()` / BLOB 全兼容 |
-| **SpinYarn 无法迁移** | PHP C 扩展，反混淆必须留在 LogShare |
+| **反混淆走 SpinYarn C ABI** | koffi 直调 `libspinyarn_capi.so`，与 LogShare 共用 mappings（`SPINYARN_MAPPINGS_DIR`）与 Redis 缓存（`SPINYARN_REDIS_URL`）；未配置或调用失败一律 fail-open。版本识别必须覆盖启动器日志（FCL/Pojav 只把版本写在 classpath 的 `intermediary/1.20.1/`），否则移动端日志永远不会反混淆——`detectVersion()` 已覆盖 7 种来源并有回归测试 |
 | **依赖体积** | `deepagents` + LangChain 全栈 `node_modules` 137MB，导入后 RSS 169MB |
 
 ## 验证命令
 
 ```bash
-npm test                    # 全部单元测试（33 个文件 382 项）
+# 测试需要本机 MariaDB：每个测试文件自建独立库 lograg_test_<hex>，用完 DROP。
+# 测试进程**不读 .env**（config.ts 刻意如此，避免本机配置串味），因此库连接要显式给：
+DB_HOST=127.0.0.1 DB_USER=lograg DB_PASSWORD=... npm test
 npm run web:test            # 前端 vitest（11 个文件 167 项）
 npm run typecheck           # TypeScript 类型检查
 npm run build && npm start  # 编译产物冒烟（必须能跑通：另有一条与 tsx 不同的路径）
 bash scripts/restart.sh     # 重启服务（等端口释放 + 等 READY + 校验 /health，不靠 sleep 猜）
 npx tsx src/rag/build-cli.ts    # 重建知识库索引（./knowledge → ./data/rag/index.db）
+npx tsx scripts/migrate_sqlite_to_mariadb.ts [--sqlite data/app.db] [--dry-run]
+                            # 把旧 SQLite 的领域知识与分析记录搬到 MariaDB（幂等，可重跑）
 npx tsx scripts/smoke-deepagent.ts   # DeepAgents 冒烟测试
 npx tsx scripts/verify-anchor.ts <日志目录>    # 窗口锚点验证
 npx tsx scripts/verify-rag.ts       # RAG 检索验证（默认索引路径已可用）

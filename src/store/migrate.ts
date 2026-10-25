@@ -152,6 +152,22 @@ const MIGRATIONS: Migration[] = [
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
     ],
   },
+  {
+    /*
+     * `log_ref` 原先按 LogShare 的七位日志 ID 设计（VARCHAR(16)）。
+     *
+     * 但上传接口返回的 `logId` 现在是**本服务的会话 ID**（20 字符），
+     * 客户端把它原样传给 `/v1/chat` 时，`findOrCreateSession` 会把它写进
+     * `log_ref`，直接报 `Data too long for column 'log_ref'`——服务端 500，
+     * 前端表现为「上传成功但一问就报错」。
+     *
+     * 放宽到 64 与 `sessions.id` 的容量留出余量；`MODIFY` 可重复执行。
+     */
+    name: '006_widen_log_ref',
+    statements: [
+      `ALTER TABLE sessions MODIFY COLUMN log_ref VARCHAR(64) NULL`,
+    ],
+  },
 ];
 
 /** 建记账表（必须最先执行，且本身幂等） */

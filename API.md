@@ -439,6 +439,7 @@ data: {"error":"分析失败：上游返回 502"}
   "session": {
     "id": "smvbpsiilbn2nl0p6",
     "logId": "kalkLqQ",
+    "hasLog": true,
     "createdAt": 1729000000,
     "expiresAt": 1731600000
   },
@@ -478,7 +479,8 @@ data: {"error":"分析失败：上游返回 502"}
 | 字段 | 说明 |
 |---|---|
 | `session.id` | 会话 ID。**不是**顶层 `sessionId`，前端从 `session.id` 取 |
-| `session.logId` | 绑定的日志 ID，可为 `null` |
+| `session.logId` | 绑定的 LogShare 日志 ID，可为 `null` |
+| `session.hasLog` | 该会话是否有可读正文。native 上传的会话 `logId` 为 `null`；纯对话被追加过材料后也算有正文。前端据此决定是否显示案卷面板，不能只看 `logId` |
 | `rounds` | 本会话剩余轮次，用于提示「还能追问几轮」 |
 | `messages[].reasoning` | 思维链。仅 assistant 且非空时出现；旧消息可能没有 |
 | `messages[].score` | 自评摘要。仅 assistant 且当时评分成功时出现；形状与 `done` 帧的 `score` 一致（不含 `recordId`） |

@@ -27,7 +27,7 @@ import {
   sessionTtlSeconds,
 } from '../store/session.ts';
 import { deobfuscate } from '../agent/deobfuscate.ts';
-import { appendSegment, putBase } from '../store/logbody.ts';
+import { appendSegment, getBase, listAppends, putBase } from '../store/logbody.ts';
 import { resolveLogContent } from './logSource.ts';
 import { isValidLogId } from '../logshare/id.ts';
 import {
@@ -298,11 +298,21 @@ async function handleSession(res: ServerResponse, sessionId: string): Promise<vo
     createdAt: m.createdAt,
   }));
 
+  // native 会话的日志正文归属就是会话本身（`logId` 为 null），
+  // 纯对话会话同样是 `logKind='native'`，因此只能靠「有没有正文」区分：
+  // 主日志（seq=0）或任何追加段（seq>=1）都算——往纯对话里追加过材料后，
+  // 它同样应该显示案卷面板。
+  const hasLog =
+    session.logId !== null ||
+    (await getBase(session.id)) !== null ||
+    (await listAppends(session.id)).length > 0;
+
   json(res, 200, {
     ok: true,
     session: {
       id: session.id,
       logId: session.logId,
+      hasLog,
       createdAt: session.createdAt,
       expiresAt: session.expiresAt,
     },
@@ -360,6 +370,19 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     typeof body.sessionId === 'string' && body.sessionId.trim() !== '' ? body.sessionId.trim() : '';
 
   let session = providedSessionId !== '' ? await getSession(providedSessionId) : null;
+
+  /*
+   * native 日志：上传响应给的 `logId` 就是**会话 ID**（URL `/s/{id}` 的那个 id）。
+   * 客户端把它原样当 `logId` 传给 `/v1/chat` 时必须复用这个会话——
+   * 否则会新建一个绑定 `log_ref=<会话ID>` 的会话，对话与日志分家：
+   * 追问记录不落在原会话里，`/s/{id}` 回放也看不到这轮问答。
+   *
+   * 仅当 ID 形态确实是会话 ID 时才这样判定（七位 LogShare ID 走原路径）。
+   */
+  if (session === null && logId !== null && /^s[a-z0-9]{8,}$/.test(logId)) {
+    session = await getSession(logId);
+  }
+
   if (session === null) {
     // 未传或已过期：在**同一主体内**按 logId 复用/新建。
     // 显式 sessionId 走的是 bearer 语义（知道 ID 即可回放），这是无登录产品

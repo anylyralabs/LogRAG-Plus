@@ -84,6 +84,8 @@ test('会话回放：前端必读字段都在（session.id / rounds / messages�
   assert.ok(session !== undefined, '响应必须有 session 对象');
   assert.equal(typeof session['id'], 'string');
   assert.ok('logId' in session, 'session.logId 必须存在（可为 null）');
+  assert.equal(typeof session['hasLog'], 'boolean', 'session.hasLog 必须存在：纯对话为 false，上传的会话为 true');
+  assert.equal(session['hasLog'], false, '没有主日志的纯对话会话应报告 hasLog=false');
   assert.equal(typeof body['rounds'], 'object');
   assert.ok(Array.isArray(body['messages']));
   assert.equal(body['sessionId'], undefined, '顶层不应再出现 sessionId（避免两份来源）');
@@ -103,6 +105,30 @@ test('会话回放：消息字段名与前端类型一致', async () => {
   assert.equal(typeof assistant['content'], 'string');
   assert.equal(typeof assistant['reasoning'], 'string');
   assert.equal(typeof assistant['createdAt'], 'number');
+});
+
+test('会话回放：hasLog 同时覆盖主日志与纯追加', async () => {
+  const { putBase, appendSegment } = await import('../src/store/logbody.ts');
+
+  // native 上传：主日志（seq=0）归属会话自身
+  const native = await findOrCreateSession(null, 3600);
+  await putBase(native.id, { content: '主日志正文' });
+  const nativeRes = await getJson(`/v1/session/${encodeURIComponent(native.id)}`);
+  assert.equal(
+    (nativeRes.body['session'] as Record<string, unknown>)['hasLog'],
+    true,
+    '有主日志的会话必须报告 hasLog=true',
+  );
+
+  // 纯对话追加：没有 seq=0，但 seq>=1 同样构成可读正文
+  const appended = await findOrCreateSession(null, 3600);
+  await appendSegment(appended.id, { content: '后来补的崩溃报告' });
+  const appendedRes = await getJson(`/v1/session/${encodeURIComponent(appended.id)}`);
+  assert.equal(
+    (appendedRes.body['session'] as Record<string, unknown>)['hasLog'],
+    true,
+    '纯对话被追加材料后也应报告 hasLog=true',
+  );
 });
 
 // ── 上传 ─────────────────────────────────────────────────
@@ -169,7 +195,7 @@ test('领域知识：新增字段是 content（不是 text）', async () => {
 });
 
 test('领域知识：列表响应结构（entries / stats）', async () => {
-  createDomainKnowledge({ content: '契约测试：这是一条先验事实断言。' });
+  await createDomainKnowledge({ content: '契约测试：这是一条先验事实断言。' });
 
   const { status, body } = await getJson('/v1/admin/domain-knowledge', ADMIN);
   assert.equal(status, 200);

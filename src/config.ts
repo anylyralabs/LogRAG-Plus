@@ -1,10 +1,10 @@
 /**
  * 运行配置：全部来自环境变量，无配置文件依赖（便于容器化与本地开发）。
  *
- * 设计原则（对齐设计文档 §3.2 数据边界）：
- *  - LogShare 是唯一数据拥有者 → 本服务对 MariaDB 只读
- *  - 会话/上传副本归本服务 → 自有 SQLite
- *  - RAG 索引只读挂载 → node:sqlite 直读
+ * 设计原则（对齐 AGENTS.md「数据边界」）：
+ *  - 会话、消息、日志正文与追加段、分析记录、领域知识 → 自有 `lograg` 库（读写）
+ *  - 从 LogShare 导入的日志正文 → `logshare` 库（只读），连不上时走公网 API 兜底
+ *  - RAG 索引 → 本地 SQLite 只读直查（`node:sqlite`，与业务数据无关）
  *
  * ## 关于 `.env`
  *
@@ -446,8 +446,14 @@ export function describeConfig(): Record<string, unknown> {
     // 由 start.ts 打印真实监听端口（可能是递增后的），这里不重复
     server: server.port,
     logshare: logshare.enabled ? logshare.internalUrl : '(独立运行模式)',
-    db: db.enabled ? `${db.user}@${db.host}:${db.port}/${db.database} (只读)` : '(未配置)',
+    db: db.enabled ? `${db.user}@${db.host}:${db.port}/${db.database} (读写)` : '(未配置)',
     redis: redis.enabled ? `${redis.host}:${redis.port} prefix=${redis.prefix}` : '(未配置，降级)',
+    // 反混淆是否启用、以及是否走了共享缓存（部署时最常问的两个问题）
+    deobfuscate: logshareDeobf.enabled
+      ? logshareDeobf.redisUrl !== ''
+        ? '启用（共用 Redis 缓存）'
+        : '启用（按需解析，无共享缓存）'
+      : '(未配置)',
     ragIndex: rag.indexPath || '(未配置)',
     ragEmbedding: rag.embedding.enabled ? rag.embedding.model : '(未配置，纯词法)',
     defaultProvider: defaultProvider.configured ? defaultProvider.model : '(未配置)',

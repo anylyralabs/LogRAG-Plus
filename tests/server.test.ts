@@ -41,7 +41,8 @@ process.env['QUOTA_ROUNDS_PER_SESSION'] = '3';
 const { createHttpServer } = await import('../src/server/index.ts');
 const { appendMessage, findOrCreateSession, getHistory } = await import('../src/store/session.ts');
 const { migrate } = await import('../src/store/migrate.ts');
-const { closePool } = await import('../src/store/mysql.ts');
+const { closePool, query } = await import('../src/store/mysql.ts');
+const { putBase } = await import('../src/store/logbody.ts');
 if (tdb.ok) await migrate();
 
 let server: Server;
@@ -227,6 +228,25 @@ test('对话：显式 sessionId 被复用（消息落到该会话）', async () 
   const after = await getHistory(s.id);
   assert.equal(after.length, before + 1, '用户消息应落到传入的会话');
   assert.equal(after[after.length - 1]?.content, '第二轮追问');
+});
+
+test('对话：上传返回的 logId（会话 ID）复用原会话，不新建也不报错', async () => {
+  const s = await findOrCreateSession(null, 3600, 'owner-native', 'native');
+  await putBase(s.id, { content: '[12:00:00] [main/ERROR]: boom' });
+
+  const before = (await query<{ n: number }>('SELECT COUNT(*) AS n FROM sessions'))[0]!.n;
+
+  // 上传响应里的 logId 就是会话 ID；客户端原样传给 chat 是正常用法。
+  // 这里不校验状态码：测试进程的假供应商可能通也可能不通（200/503 都合法），
+  // 真正要守的是「复用同一会话」与「消息落库」。
+  await postChat({ message: '为什么崩溃', logId: s.id });
+
+
+  const after = (await query<{ n: number }>('SELECT COUNT(*) AS n FROM sessions'))[0]!.n;
+  assert.equal(after, before, '不应新建会话');
+
+  const history = await getHistory(s.id);
+  assert.equal(history[history.length - 1]?.content, '为什么崩溃');
 });
 
 test('对话：未知 sessionId 不被采纳，原会话不受影响', async () => {

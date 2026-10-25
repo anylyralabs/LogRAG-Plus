@@ -25,6 +25,15 @@ import type { RunResult } from '../src/agent/runner.ts'
 import { createToolContext } from '../src/agent/tools/index.ts'
 import type { SseWriter } from '../src/server/sse.ts'
 
+/*
+ * `buildTools()` 会探测领域知识库（真实 MariaDB），连接池里的空闲连接会
+ * 把进程挂住——测试全过、文件却不退出。这里显式关闭；库未配置时是空操作。
+ */
+test.after(async () => {
+  const { closePool } = await import('../src/store/mysql.ts')
+  await closePool()
+})
+
 // ── 假模型：问一次 → 又想调工具（模拟「问完继续自检」）──────────
 
 interface Step {

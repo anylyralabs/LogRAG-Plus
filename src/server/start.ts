@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { describeConfig, server as serverCfg } from '../config.ts';
+import { migrate } from '../store/migrate.ts';
 import { closePool } from '../store/mysql.ts';
 import { createHttpServer, startSessionCleanup } from './index.ts';
 import { webBuilt, webDir } from './static.ts';
@@ -45,6 +46,25 @@ function listenOnce(server: Server, port: number, host: string): Promise<void> {
  * 递增既让重启不失败，也把真实端口打进日志，避免「启动了但连着旧实例」。
  */
 export async function startServer(): Promise<Server> {
+  /*
+   * 建表必须先于监听。
+   *
+   * 迁移是幂等的（`lograg_migrations` 记账 + DDL 全部 `IF NOT EXISTS`），
+   * 每次启动只多一条 SELECT；而漏掉它的代价是**全新部署直接不可用**——
+   * 服务能起来、健康检查也通（那只查进程状态），但第一个上传/对话请求
+   * 会以「表不存在」失败，且错误只在请求路径上出现，不像启动失败那样显眼。
+   * 这条路径在迁移到新机器时真的踩到了，故固定在启动流程里。
+   */
+  let migration: { applied: string[]; skipped: number };
+  try {
+    migration = await migrate();
+  } catch (e) {
+    throw new Error(`数据库迁移失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (migration.applied.length > 0) {
+    console.log(`  数据库迁移         应用 ${migration.applied.length} 项：${migration.applied.join(', ')}`);
+  }
+
   const basePort = serverCfg.port;
   const host = serverCfg.host;
   const tries = autoIncrement ? MAX_PORT_TRIES : 1;
@@ -119,7 +139,7 @@ function describeRuntime(): Record<string, unknown> {
  *
  * 原先**没有任何信号处理**：`kill` 之后靠 Node 默认行为退出，进程常滞后数秒
  * 才释放端口，于是紧接着的重启必然撞 EADDRINUSE。这里显式关闭：
- * 停止接新连接 → 关 SQLite → 关 worker 池 → 退出。
+ * 停止接新连接 → 关日志工具缓存 → 关数据库连接池 → 退出。
  */
 function installShutdownHandlers(server: Server): void {
   const shutdown = (signal: string): void => {

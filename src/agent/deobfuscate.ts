@@ -191,14 +191,53 @@ function getHandle(): Handle | null {
   }
 }
 
-/** 从日志头识别 MC 版本（`Loading Minecraft 1.21.11` / 崩溃报告的 `Minecraft Version`） */
+/**
+ * 从日志里识别 MC 版本。
+ *
+ * ## 为什么要认这么多种写法
+ *
+ * 上传的不一定是游戏自己的 `latest.log`。移动端启动器（FCL/ZL2/Pojav）上传的
+ * 往往是**启动器日志**，里面没有 `Loading Minecraft X`；它们只把版本写进
+ * 启动参数或 classpath：
+ *
+ * | 来源 | 形态 |
+ * |---|---|
+ * | 原版 / Fabric 游戏日志 | `Loading Minecraft 1.21.11 with Fabric Loader …` |
+ * | 崩溃报告 | `Minecraft Version: 1.20.1` |
+ * | FCL / Pojav classpath | `…/intermediary/1.20.1/intermediary-1.20.1.jar` |
+ * | Forge 启动参数 | `--fml.mcVersion 1.20.1` |
+ * | Forge maven 坐标 | `net.minecraftforge:forge:1.20.1-47.4.23` |
+ * | 原版启动器目录 | `…/versions/1.20.1/1.20.1.jar` |
+ *
+ * 顺序即优先级：越靠前的越不容易误判。全部要求以数字开头，
+ * 像 `--version 换形者诅咒`（FCL 的实例名）不会被当成版本号。
+ *
+ * 扫描窗口取 64KB 而不是 20KB：启动器日志的 classpath 往往在很后面，
+ * 实测 FCL 那份 24KB 的日志里，`intermediary/1.20.1` 位于第 232 行。
+ */
 export function detectVersion(text: string): string | null {
-  const head = text.slice(0, 20_000);
-  const m =
-    /Loading Minecraft\s+([0-9][\w.+-]*)/i.exec(head) ??
-    /Minecraft Version:\s*([0-9][\w.+-]*)/i.exec(head) ??
-    /--fml\.mcVersion\s+([0-9][\w.+-]*)/i.exec(head);
-  return m?.[1] ?? null;
+  const head = text.slice(0, 64 * 1024);
+
+  const patterns: RegExp[] = [
+    /Loading Minecraft\s+([0-9][\w.+-]*)/i,
+    /Minecraft Version:\s*([0-9][\w.+-]*)/i,
+    /intermediary\/([0-9][\w.+-]*)\//i,
+    /--fml\.mcVersion\s+([0-9][\w.+-]*)/i,
+    /net\.minecraftforge:forge:([0-9][\w.+-]*)-/i,
+    /\/versions\/([0-9][\w.+-]*)\//i,
+    /\bminecraft(?:_version)?\s*[=:]\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)/i,
+  ];
+
+  for (const re of patterns) {
+    const m = re.exec(head);
+    const raw = m?.[1];
+    if (raw === undefined) continue;
+    // 版本号结尾不会带标点；正则里的 `[\w.+-]*` 可能把句末的句号吞进来
+    const cleaned = raw.replace(/[.,;:]+$/, '');
+    if (/^[0-9]/.test(cleaned)) return cleaned;
+  }
+
+  return null;
 }
 
 /** 该版本在 mappings 目录里是否有映射文件（没有就不必反混淆） */
@@ -214,6 +253,15 @@ export function hasMapping(version: string): boolean {
  */
 export function deobfuscate(text: string, version?: string): DeobfuscateResult {
   if (text === '') return { text, changed: false };
+
+  /*
+   * 未配置就**直接跳过**，不当作错误。
+   *
+   * 反混淆是可选增强，没配 `.so` 与 mappings 时它不是「失败」而是「没开启」；
+   * 若往下走，`resolve('')` 会解析成工作目录，koffi 报
+   * `cannot read file data: Is a directory`，把一句无意义的报错塞进每次上传的响应。
+   */
+  if (!cfg.enabled) return { text, changed: false };
 
   const ver = version ?? detectVersion(text);
   if (ver === null) {
