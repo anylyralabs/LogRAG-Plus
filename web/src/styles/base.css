@@ -1,0 +1,547 @@
+/* 基础层：重置、排版、焦点、滚动条、通用结构件。 */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 移动端浏览器下拉刷新会中断上传/长文本选择，应用内自行处理滚动 */
+  overscroll-behavior: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure,
+blockquote,
+dl,
+dd {
+  margin: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  letter-spacing: -0.012em;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+/*
+ * 等宽**只给机器数据**：ID、行号、工具名、计数、文件名、代码。
+ * 中文不要进等宽——汉字是全角方块，与拉丁字母并排时字面宽度不一致，
+ * 看起来像没对齐（早先 `.mono` 被套在整句中文上，这是全站最显眼的粗糙来源之一）。
+ */
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/*
+ * 焦点必须可见：这份界面里「当前在读哪一行、按到了哪个按钮」是核心信息，
+ * 不能只靠 hover 表达（移动端根本没有 hover）。
+ */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── 滚动条：细、低对比，不与内容争注意力 ─────────────────── */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-4);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 结构件 ─────────────────────────────────────────────── */
+
+/*
+ * 栏目标记：中文小标题 + 一条发丝线。
+ *
+ * 线用 baseline 会贴到文字基线（视觉上偏高），用 center 又会被行高盒带偏。
+ * 给文字固定行高后，线与文字中线严格同高——这是页面上出现次数最多的结构件，
+ * 差 1px 会在一屏里重复十几次。
+ */
+.label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  line-height: 16px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.label--plain::after {
+  display: none;
+}
+
+.rule {
+  height: 1px;
+  background: var(--rule);
+  border: 0;
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--ink-3);
+}
+
+.dim {
+  color: var(--ink-4);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * 只在窄屏 / 只在宽屏出现的元素。
+ *
+ * 不能写成 `.only-narrow { display: none }` + 窄屏 `display: initial`：
+ * 同一元素通常还带 `.btn`，而 `.btn` 定义了 `display: inline-flex`，
+ * 后出现、同权重，会覆盖掉 `display: none`——表现是宽屏也显示。
+ * 因此只在宽屏加 `!important` 隐藏，窄屏保持组件自己的 display。
+ */
+@media (min-width: 960px) {
+  .only-narrow {
+    display: none !important;
+  }
+}
+
+@media (max-width: 959px) {
+  .only-wide {
+    display: none !important;
+  }
+}
+
+/* ── 通用控件 ───────────────────────────────────────────── */
+
+/*
+ * 按钮：默认是**无边框的文字按钮**。
+ *
+ * 早先每个按钮都带 1px 边框 + 2px 圆角，一屏里出现十几个方框，
+ * 这就是「满屏小方框」的来源。层级改由底色与字色表达：
+ *   .btn            静默（仅 hover 上底色）
+ *   .btn--subtle    次级动作（淡底）
+ *   .btn--primary   主动作（实心）
+ *   .btn--danger    破坏性
+ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: var(--fs-meta);
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--paper-inset);
+  color: var(--ink);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--paper-sunken);
+}
+
+.btn:disabled {
+  opacity: 0.42;
+}
+
+.btn--subtle {
+  background: var(--paper-inset);
+  color: var(--ink-2);
+}
+
+.btn--subtle:hover:not(:disabled) {
+  background: var(--paper-sunken);
+  color: var(--ink);
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: var(--paper-raised);
+  font-weight: 500;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-ink);
+  color: var(--paper-raised);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--accent-ink);
+}
+
+.btn--danger {
+  color: var(--danger);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.btn--sm {
+  height: 26px;
+  padding: 0 8px;
+  font-size: var(--fs-micro);
+  border-radius: 5px;
+}
+
+.btn--lg {
+  height: 38px;
+  padding: 0 16px;
+  font-size: var(--fs-body);
+}
+
+/*
+ * 图标按钮必须是正方形。
+ *
+ * 早先 `.btn` 高 32、`.btn--sm` 高 26，而 `.btn--icon` 固定 width: 32，
+ * 于是「小号图标按钮」实际是 32×26 的长方形——图标看着偏下、右边还比别的元素宽。
+ */
+.btn--icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.btn--icon.btn--sm {
+  width: 26px;
+  height: 26px;
+}
+
+.btn--icon svg {
+  display: block;
+}
+
+.btn--block {
+  width: 100%;
+}
+
+/* ── 表单控件 ───────────────────────────────────────────── */
+
+.input,
+.textarea,
+.select {
+  width: 100%;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  background: var(--paper-raised);
+  color: var(--ink);
+  font-size: var(--fs-body);
+  padding: 8px 11px;
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-4);
+}
+
+.input:hover:not(:disabled),
+.textarea:hover:not(:disabled),
+.select:hover:not(:disabled) {
+  border-color: var(--ink-4);
+}
+
+.input:focus,
+.textarea:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.input:disabled,
+.textarea:disabled {
+  background: var(--paper-inset);
+  color: var(--ink-3);
+}
+
+.textarea {
+  resize: vertical;
+  line-height: 1.65;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field > label,
+.field-label {
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.field-help {
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+/* 状态点：分析中 / 成功 / 警告，不靠颜色单独表意 */
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.dot--live {
+  animation: pulse 1.6s var(--ease) infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/*
+ * 徽章：**尽量不用**。
+ *
+ * 状态优先用字色与一个小圆点表达；只有「需要立刻分辨的多值状态」
+ * （如 可交付 / 需复核）才用底色块。满屏 badge 会让页面像标签云。
+ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--paper-inset);
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.badge--accent {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.badge--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.badge--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.badge--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+/* 内联提示条：错误、警告、说明 */
+.alert {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--paper-inset);
+  color: var(--ink-2);
+  font-size: var(--fs-meta);
+  line-height: 1.65;
+}
+
+.alert--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.alert--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.alert--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.alert svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* 空状态 */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-7) var(--sp-4);
+  color: var(--ink-3);
+  text-align: center;
+  font-size: var(--fs-meta);
+}
+
+/* 加载骨架 */
+.skeleton {
+  background: linear-gradient(90deg, var(--paper-inset), var(--paper-raised), var(--paper-inset));
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: var(--radius);
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}

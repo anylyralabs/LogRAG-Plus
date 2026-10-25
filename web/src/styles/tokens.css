@@ -1,0 +1,176 @@
+/*
+ * 设计令牌
+ *
+ * ## 三层深度，而不是一层底色 + 一堆边框
+ * 早先全站只有两个几乎同色的米白（#f6f4ef / #efede6），结构完全靠 1px 线撑着，
+ * 于是每个元素都必须画个框才看得清——这就是「生草」的主因：满屏小方框。
+ *
+ * 现在分三层，颜色本身就表达层级：
+ *   paper        画布（应用外壳、侧栏所在地）
+ *   paper-raised 纸面（阅读区、案卷、悬浮层）——比画布亮，视线自然落上去
+ *   paper-sunken 凹陷（导航、引用块、代码）
+ *
+ * ## 等宽只给机器数据
+ * ID、行号、工具名、计数、文件名用 --font-mono；中文一律 --font-sans。
+ * 等宽字体里的汉字是全角方块，与拉丁字母并排时字面宽度不一致，会显得没对齐。
+ */
+
+:root {
+  /* ── 原料：浅色（纸） ─────────────────────────────── */
+  --paper: #e9e4d8;
+  --paper-raised: #fbfaf6;
+  --paper-sunken: #e0daca;
+  --paper-inset: #f1ede3;
+  --ink: #1b1a17;
+  --ink-2: #4a473f;
+  --ink-3: #625d53;
+  --ink-4: #7b7568;
+  --rule: #d8d2c2;
+  --rule-strong: #c3bca9;
+  --rule-muted: #e6e0d2;
+  --accent: #2c5751;
+  --accent-ink: #23433e;
+  --accent-soft: rgba(44, 87, 81, 0.09);
+  --accent-line: rgba(44, 87, 81, 0.3);
+  --danger: #9c4a3c;
+  --danger-soft: rgba(156, 74, 60, 0.09);
+  --warn: #7e5418;
+  --warn-soft: rgba(126, 84, 24, 0.1);
+  --ok: #3d6647;
+  --ok-soft: rgba(61, 102, 71, 0.1);
+  --selection: rgba(44, 87, 81, 0.14);
+  --search: rgba(126, 84, 24, 0.2);
+  --overlay: rgba(22, 21, 18, 0.4);
+  --shadow: 0 20px 50px rgba(28, 27, 22, 0.16);
+  --shadow-sm: 0 1px 2px rgba(28, 27, 22, 0.05);
+  --focus: rgba(44, 87, 81, 0.5);
+
+  /* ── 度量 ─────────────────────────────────────────── */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', 'DejaVu Sans Mono',
+    'Noto Sans Mono', monospace;
+
+  /* 字号：5 档，每档有明确职责（半像素字号在屏幕上分辨不出，只会破坏节奏） */
+  --fs-micro: 11px;
+  --fs-meta: 12px;
+  --fs-body: 15px;
+  --fs-lead: 17px;
+  --fs-title: 22px;
+  --fs-display: 32px;
+
+  --lh-tight: 1.32;
+  /*
+   * 1.65（15px → 约 24.8px）。早先是 1.8：汉字行距本来就比拉丁文显松，
+   * 1.8 叠加段落间距后「段与段挤成一团、段内行与行离得老远」，
+   * 阅读单元被切碎——反馈里的「段高行高太大」就是这个。
+   */
+  --lh-body: 1.65;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+
+  --radius: 3px;
+  --radius-control: 7px;
+  --radius-field: 10px;
+
+  --dur: 140ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  --sidebar-w: 248px;
+  --thread-w: 780px;
+  --dossier-w: 460px;
+  --topbar-h: 52px;
+}
+
+/*
+ * 移动端顶栏收窄到 44px。
+ *
+ * 窄屏把品牌文字隐藏后，顶栏只剩一排 32px 的图标按钮；52px 的高度里
+ * 上下各剩 10px 空白，图标像浮在半空。44px 是移动端导航栏的惯例高度，
+ * 也正好给 32px 按钮留 6px 呼吸。
+ * 改令牌而不是改组件：AppTopBar 与 AdminPage 都引用 --topbar-h，
+ * 一处生效两处跟随。
+ */
+@media (max-width: 959px) {
+  :root {
+    --topbar-h: 44px;
+  }
+}
+
+/*
+ * 深色（石墨）。不是把浅色反相：纸的暖调在深色下会变成脏黄，
+ * 因此底取中性石墨、文字取略暖的骨白；三层深度同样保留。
+ */
+:root[data-theme='dark'] {
+  --paper: #101010;
+  --paper-raised: #191918;
+  --paper-sunken: #0b0b0a;
+  --paper-inset: #222120;
+  --ink: #eae6db;
+  --ink-2: #b6b1a4;
+  --ink-3: #8f8a7e;
+  --ink-4: #736e63;
+  --rule: #2b2a26;
+  --rule-strong: #3d3b35;
+  --rule-muted: #232220;
+  --accent: #93b7ab;
+  --accent-ink: #aacabd;
+  --accent-soft: rgba(147, 183, 171, 0.1);
+  --accent-line: rgba(147, 183, 171, 0.28);
+  --danger: #d9847a;
+  --danger-soft: rgba(217, 132, 122, 0.1);
+  --warn: #d3a25f;
+  --warn-soft: rgba(211, 162, 95, 0.1);
+  --ok: #8fbe9a;
+  --ok-soft: rgba(143, 190, 154, 0.1);
+  --selection: rgba(147, 183, 171, 0.16);
+  --search: rgba(211, 162, 95, 0.22);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --focus: rgba(147, 183, 171, 0.55);
+}
+
+/*
+ * 系统主题：`data-theme` 未显式设置时跟随 prefers-color-scheme。
+ * JS 会在首屏前写入 data-theme，这里的媒体查询是兜底（例如禁用 JS 时）。
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --paper: #101010;
+    --paper-raised: #191918;
+    --paper-sunken: #0b0b0a;
+    --paper-inset: #222120;
+    --ink: #eae6db;
+    --ink-2: #b6b1a4;
+    --ink-3: #8f8a7e;
+    --ink-4: #736e63;
+    --rule: #2b2a26;
+    --rule-strong: #3d3b35;
+    --rule-muted: #232220;
+    --accent: #93b7ab;
+    --accent-ink: #aacabd;
+    --accent-soft: rgba(147, 183, 171, 0.1);
+    --accent-line: rgba(147, 183, 171, 0.28);
+    --danger: #d9847a;
+    --danger-soft: rgba(217, 132, 122, 0.1);
+    --warn: #d3a25f;
+    --warn-soft: rgba(211, 162, 95, 0.1);
+    --ok: #8fbe9a;
+    --ok-soft: rgba(143, 190, 154, 0.1);
+    --selection: rgba(147, 183, 171, 0.16);
+    --search: rgba(211, 162, 95, 0.22);
+    --overlay: rgba(0, 0, 0, 0.6);
+    --shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --focus: rgba(147, 183, 171, 0.55);
+  }
+}

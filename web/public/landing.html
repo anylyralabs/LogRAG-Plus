@@ -1,0 +1,2075 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="description"
+      content="LogRAG+ 读取 Minecraft 崩溃日志，给出一句话根因、可照做的处理步骤，以及能回到日志行核对的证据。"
+    />
+    <title>LogRAG+ · 把崩溃日志读成一份可执行的结论</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23121211'/%3E%3Cpath d='M9 7h14v3H12v5h9v3h-9v5h11v3H9z' fill='%238FB3A7'/%3E%3C/svg%3E"
+    />
+    <style>
+      /*
+       * 官网首页：与应用同一套「勘验卷宗」语言，但结构是产品说明页。
+       *
+       * 刻意不用：渐变、玻璃拟态、圆角卡片、emoji、网络字体、远程图片。
+       * 层级靠发丝线与字级差；深色沿用石墨、浅色沿用纸。
+       */
+      :root {
+        --paper: #f6f4ef;
+        --paper-raised: #fbfaf6;
+        --paper-sunken: #efede6;
+        --ink: #1f1e1b;
+        --ink-2: #4a4842;
+        --ink-3: #6e6b62;
+        --ink-4: #918d82;
+        --rule: #ddd8cc;
+        --rule-strong: #c8c2b2;
+        --accent: #2f5d57;
+        --accent-soft: rgba(47, 93, 87, 0.08);
+        --accent-line: rgba(47, 93, 87, 0.35);
+        --danger: #a33a32;
+        --warn: #8a5a1e;
+        --font-sans:
+          system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+          'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        --font-mono:
+          ui-monospace, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', 'DejaVu Sans Mono',
+          'Noto Sans Mono', monospace;
+        --wrap: 1080px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #121211;
+          --paper-raised: #191917;
+          --paper-sunken: #0d0d0c;
+          --ink: #e7e3d8;
+          --ink-2: #b4afa3;
+          --ink-3: #8b867b;
+          --ink-4: #6b675e;
+          --rule: #2a2925;
+          --rule-strong: #3b3933;
+          --accent: #8fb3a7;
+          --accent-soft: rgba(143, 179, 167, 0.1);
+          --accent-line: rgba(143, 179, 167, 0.35);
+          --danger: #d9847a;
+          --warn: #d3a25f;
+        }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--font-sans);
+        font-size: 15px;
+        line-height: 1.75;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p,
+      ul,
+      ol,
+      dl,
+      dd,
+      figure,
+      figcaption,
+      blockquote {
+        margin: 0;
+      }
+
+      ul,
+      ol {
+        padding: 0;
+        margin: 0;
+        list-style: none;
+      }
+
+      code,
+      pre,
+      .mono {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+
+      ::selection {
+        background: var(--accent-soft);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+
+      .wrap {
+        max-width: var(--wrap);
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      /* ── 顶栏 ─────────────────────────────────────────── */
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid var(--rule);
+        background: color-mix(in srgb, var(--paper) 92%, transparent);
+        backdrop-filter: blur(8px);
+      }
+
+      .nav__inner {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        height: 56px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--ink);
+        text-decoration: none;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .nav__links {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        margin-left: auto;
+      }
+
+      .nav__links a {
+        color: var(--ink-2);
+        text-decoration: none;
+        font-size: 13px;
+      }
+
+      .nav__links a:hover {
+        color: var(--ink);
+      }
+
+      .nav__cta {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--paper) !important;
+        font-size: 13px;
+        font-weight: 500;
+        text-decoration: none;
+      }
+
+      .nav__cta:hover {
+        filter: brightness(1.06);
+      }
+
+      /* ── Hero ─────────────────────────────────────────── */
+
+      .hero {
+        position: relative;
+        padding: 88px 0 72px;
+        border-bottom: 1px solid var(--rule);
+        overflow: hidden;
+      }
+
+      .hero__inner {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        gap: 56px;
+        align-items: center;
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--ink-3);
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.05em;
+      }
+
+      .eyebrow::after {
+        content: '';
+        width: 44px;
+        height: 1px;
+        background: var(--rule-strong);
+      }
+
+      h1 {
+        margin-top: 18px;
+        font-size: clamp(30px, 4.6vw, 46px);
+        line-height: 1.24;
+        font-weight: 600;
+        letter-spacing: -0.025em;
+        max-width: 19em;
+      }
+
+      .hero__lead {
+        max-width: 31em;
+        margin-top: 20px;
+        color: var(--ink-2);
+        font-size: 16px;
+        line-height: 1.8;
+      }
+
+      .hero__actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 30px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        height: 42px;
+        padding: 0 20px;
+        border: 1px solid var(--rule-strong);
+        background: transparent;
+        color: var(--ink);
+        font-family: inherit;
+        font-size: 14px;
+        text-decoration: none;
+        transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+      }
+
+      .btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .btn--primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--paper);
+        font-weight: 500;
+      }
+
+      .btn--primary:hover {
+        color: var(--paper);
+        filter: brightness(1.07);
+      }
+
+      .hero__meta {
+        display: flex;
+        gap: 22px;
+        flex-wrap: wrap;
+        margin-top: 26px;
+        color: var(--ink-4);
+        font-size: 12px;
+      }
+
+      .hero__meta span {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+      }
+
+      .hero__meta b {
+        color: var(--ink-2);
+        font-weight: 500;
+        font-family: var(--font-mono);
+      }
+
+      /* 右侧示意：一份被标出故障行的日志 */
+      .specimen {
+        min-width: 0;
+        max-width: 100%;
+        border: 1px solid var(--rule);
+        background: var(--paper-raised);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.06);
+      }
+
+      .specimen__head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--rule);
+        color: var(--ink-3);
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+
+      .specimen__dot {
+        width: 6px;
+        height: 6px;
+        background: var(--accent);
+      }
+
+      .specimen__body {
+        display: flex;
+        flex-direction: column;
+        padding: 10px 0;
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        line-height: 1.9;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+      }
+
+      /* 宽屏下不需要滚动，交给卡片自身宽度 */
+      @media (min-width: 901px) {
+        .specimen__body {
+          overflow-x: hidden;
+        }
+      }
+
+      .ln {
+        display: flex;
+        gap: 14px;
+        padding: 0 12px;
+        white-space: pre;
+      }
+
+      .ln__no {
+        flex: none;
+        width: 3em;
+        color: var(--ink-4);
+        text-align: right;
+        user-select: none;
+      }
+
+      .ln__t {
+        color: var(--ink-2);
+      }
+
+      .ln--dim .ln__t {
+        color: var(--ink-4);
+      }
+
+      .ln--err .ln__t,
+      .ln--err .ln__no {
+        color: var(--danger);
+      }
+
+      .ln--mark {
+        background: var(--accent-soft);
+        box-shadow: inset 2px 0 0 var(--accent);
+      }
+
+      .specimen__foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 12px;
+        border-top: 1px solid var(--rule);
+        color: var(--ink-4);
+        font-size: 11px;
+      }
+
+      /*
+       * 从日志里「长出来」的结论卡。
+       *
+       * hero 要讲的是「日志 → 结论」这一步，而不是展示一份日志。
+       * 卡片向上叠住日志底部，形成层次；只用发丝线与阴影，不用渐变。
+       */
+      .specimen__verdict {
+        position: relative;
+        margin: -14px 14px 16px;
+        padding: 14px 16px;
+        border: 1px solid var(--accent-line);
+        background: var(--paper-raised);
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.08);
+      }
+
+      .specimen__verdict-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--accent);
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+      }
+
+      .specimen__verdict-tag::before {
+        content: '';
+        width: 5px;
+        height: 5px;
+        background: var(--accent);
+      }
+
+      .specimen__verdict-text {
+        margin-top: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        line-height: 1.6;
+      }
+
+      .specimen__verdict-foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid var(--rule);
+        color: var(--ink-4);
+        font-size: 11px;
+      }
+
+      .specimen__verdict-foot code {
+        color: var(--ink-2);
+        font-size: 11px;
+      }
+
+      .specimen__verdict-arrow {
+        margin-left: auto;
+        color: var(--accent);
+      }
+
+      /* ── 分节通用 ─────────────────────────────────────── */
+
+      .section {
+        padding: 76px 0;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      /* sticky 顶栏会盖住锚点目标的首行，跳转时留出它的高度 */
+      section[id] {
+        scroll-margin-top: 72px;
+      }
+
+      .section__head {
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      .section__no {
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+
+      h2 {
+        font-size: clamp(22px, 2.6vw, 29px);
+        line-height: 1.35;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+
+      .section__lead {
+        max-width: 40em;
+        margin-top: 12px;
+        color: var(--ink-2);
+      }
+
+      /* 交替底色：长页需要呼吸，但不用「卡片堆叠」制造假层次 */
+      .section--tint {
+        background: var(--paper-raised);
+      }
+
+      /* ── 工作台示意：DOM 微交互，不是截图 ─────────────── */
+
+      .workspace {
+        display: grid;
+        grid-template-columns: 152px minmax(0, 1fr);
+        margin-top: 40px;
+        border: 1px solid var(--rule);
+        background: var(--paper-raised);
+        box-shadow: 0 22px 54px rgba(0, 0, 0, 0.06);
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .workspace__rail {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 10px;
+        border-right: 1px solid var(--rule);
+        background: var(--paper);
+      }
+
+      .workspace__rail-head {
+        padding: 2px 6px 8px;
+        color: var(--ink-4);
+        font-size: 10.5px;
+        letter-spacing: 0.06em;
+      }
+
+      .workspace__rail-item {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        width: 100%;
+        padding: 8px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--ink-3);
+        font-family: inherit;
+        font-size: 11.5px;
+        line-height: 1.45;
+        text-align: left;
+        cursor: pointer;
+        transition: background 140ms ease, color 140ms ease;
+      }
+
+      .workspace__rail-item:hover {
+        background: var(--paper-sunken);
+        color: var(--ink-2);
+      }
+
+      .workspace__rail-item.is-active {
+        background: var(--accent-soft);
+        color: var(--ink);
+      }
+
+      .workspace__rail-meta {
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      .workspace__stage {
+        min-width: 0;
+        min-height: 336px;
+      }
+
+      .workspace__scene {
+        display: none;
+        grid-template-columns: minmax(0, 1fr) 224px;
+        min-height: 336px;
+      }
+
+      .workspace__scene.is-active {
+        display: grid;
+      }
+
+      .workspace.is-live {
+        animation: ws-in 480ms ease both;
+      }
+
+      @keyframes ws-in {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .workspace__scene.is-enter .workspace__main > *,
+      .workspace__scene.is-enter .workspace__dossier > * {
+        animation: ws-rise 360ms ease both;
+      }
+
+      @keyframes ws-rise {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .workspace__main {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-width: 0;
+        padding: 16px 18px;
+      }
+
+      .workspace__meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+      }
+
+      .workspace__user {
+        align-self: flex-end;
+        max-width: 86%;
+        padding: 8px 12px;
+        border-radius: 12px 12px 3px 12px;
+        background: var(--paper-sunken);
+        font-size: 12.5px;
+        line-height: 1.55;
+      }
+
+      .workspace__trace {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px 0 6px 11px;
+        border-left: 2px solid var(--rule-strong);
+      }
+
+      .workspace__step {
+        display: block;
+        width: 100%;
+        padding: 3px 6px;
+        border: 0;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--ink-3);
+        font-family: inherit;
+        font-size: 11.5px;
+        line-height: 1.5;
+        text-align: left;
+        cursor: pointer;
+        transition: background 140ms ease, color 140ms ease;
+      }
+
+      .workspace__step:hover {
+        background: var(--accent-soft);
+        color: var(--ink-2);
+      }
+
+      .workspace__step b {
+        color: var(--ink-2);
+        font-weight: 500;
+      }
+
+      .workspace__step-result {
+        display: block;
+        max-height: 0;
+        overflow: hidden;
+        opacity: 0;
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        transition: max-height 180ms ease, opacity 180ms ease, margin-top 180ms ease;
+      }
+
+      .workspace__step.is-open .workspace__step-result {
+        max-height: 3em;
+        margin-top: 3px;
+        opacity: 1;
+      }
+
+      .workspace__verdict {
+        padding: 11px 13px;
+        border: 1px solid var(--rule);
+        background: var(--paper-raised);
+      }
+
+      .workspace__verdict-tag {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+      }
+
+      .workspace__verdict p {
+        margin-top: 6px;
+        font-size: 12.5px;
+        font-weight: 500;
+        line-height: 1.55;
+      }
+
+      .workspace__verdict-steps {
+        margin-top: 8px;
+        color: var(--ink-3);
+        font-size: 11.5px;
+        line-height: 1.55;
+      }
+
+      .workspace__anchors {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 9px;
+        padding-top: 8px;
+        border-top: 1px solid var(--rule);
+      }
+
+      .workspace__anchors-label {
+        color: var(--ink-4);
+        font-size: 10px;
+        letter-spacing: 0.06em;
+      }
+
+      .workspace__anchor {
+        padding: 2px 6px;
+        border: 1px solid var(--rule);
+        border-radius: 3px;
+        background: transparent;
+        color: var(--ink-2);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        cursor: pointer;
+        transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+      }
+
+      .workspace__anchor:hover,
+      .workspace__anchor:focus-visible {
+        border-color: var(--accent-line);
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      .workspace__dossier {
+        min-width: 0;
+        padding: 12px 10px;
+        border-left: 1px solid var(--rule);
+        background: var(--paper);
+      }
+
+      .workspace__dossier-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 2px 9px;
+        border-bottom: 1px solid var(--rule);
+        color: var(--ink-3);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+      }
+
+      .workspace__dossier-body {
+        padding-top: 8px;
+        overflow-x: auto;
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        line-height: 1.9;
+        /* 仍是可滚动的，只是预览里不画滚动条——它比内容本身更抢眼 */
+        scrollbar-width: none;
+      }
+
+      .workspace__dossier-body::-webkit-scrollbar {
+        display: none;
+      }
+
+      .workspace__dossier-body span {
+        display: block;
+        white-space: pre;
+        border-radius: 2px;
+        transition: background 140ms ease, color 140ms ease;
+      }
+
+      .workspace__dossier-body span.is-hot,
+      .workspace__dossier-body span.is-flash {
+        background: var(--accent-soft);
+        box-shadow: inset 2px 0 0 var(--accent);
+        color: var(--ink);
+      }
+
+      .workspace__dossier-body .is-doc {
+        margin-top: 5px;
+        color: var(--ink-3);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .workspace.is-live,
+        .workspace__scene.is-enter .workspace__main > *,
+        .workspace__scene.is-enter .workspace__dossier > * {
+          animation: none;
+        }
+      }
+
+      .workspace__notes {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin-top: 30px;
+        border-top: 1px solid var(--rule);
+      }
+
+      .workspace__notes li {
+        padding: 20px 22px 0 0;
+        color: var(--ink-2);
+        font-size: 13.5px;
+        line-height: 1.7;
+      }
+
+      .workspace__notes li + li {
+        padding-left: 22px;
+        border-left: 1px solid var(--rule);
+      }
+
+      .workspace__notes b {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--ink);
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+
+      /* 三件事 */
+      .pillars {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin-top: 42px;
+        border-top: 1px solid var(--rule);
+      }
+
+      .pillar {
+        padding: 26px 26px 26px 0;
+        border-right: 1px solid var(--rule);
+      }
+
+      .pillar:nth-child(3n) {
+        border-right: 0;
+        padding-right: 0;
+      }
+
+      .pillar:not(:nth-child(3n)) {
+        margin-right: 26px;
+      }
+
+      .pillar h3 {
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .pillar p {
+        margin-top: 10px;
+        color: var(--ink-2);
+        font-size: 14px;
+        line-height: 1.8;
+      }
+
+      .pillar code {
+        padding: 1px 4px;
+        border: 1px solid var(--rule);
+        background: var(--paper-sunken);
+        color: var(--ink-2);
+        font-size: 0.9em;
+      }
+
+      /* 三步 */
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0;
+        margin-top: 42px;
+        border: 1px solid var(--rule);
+      }
+
+      .step {
+        padding: 26px;
+        border-right: 1px solid var(--rule);
+        background: var(--paper-raised);
+      }
+
+      .step:last-child {
+        border-right: 0;
+      }
+
+      .step__no {
+        color: var(--accent);
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+
+      .step h3 {
+        margin-top: 10px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .step p {
+        margin-top: 8px;
+        color: var(--ink-2);
+        font-size: 13.5px;
+        line-height: 1.8;
+      }
+
+      /* 结论示意 */
+      .verdict {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+        gap: 48px;
+        align-items: start;
+        margin-top: 42px;
+      }
+
+      .verdict__main {
+        border-left: 2px solid var(--accent);
+        padding-left: 20px;
+      }
+
+      .verdict__label {
+        color: var(--ink-3);
+        font-size: 11px;
+        letter-spacing: 0.05em;
+      }
+
+      .verdict__root {
+        margin-top: 10px;
+        font-size: 19px;
+        line-height: 1.6;
+        font-weight: 500;
+        max-width: 24em;
+      }
+
+      .verdict__steps {
+        margin-top: 26px;
+        border-top: 1px solid var(--rule);
+      }
+
+      .vstep {
+        display: grid;
+        grid-template-columns: 2.4rem 1fr;
+        gap: 10px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .vstep__no {
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+
+      .vstep__text {
+        color: var(--ink-2);
+        font-size: 14px;
+      }
+
+      .verdict__side {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .score {
+        border: 1px solid var(--rule);
+        background: var(--paper-raised);
+      }
+
+      .score__head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .score__num {
+        font-family: var(--font-mono);
+        font-size: 26px;
+        line-height: 1;
+        color: var(--ink);
+      }
+
+      .score__tag {
+        padding: 2px 7px;
+        border: 1px solid var(--accent-line);
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+      }
+
+      .score__rows {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .score__row {
+        display: grid;
+        grid-template-columns: 3.2em 1fr 2.4em;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px;
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+
+      .score__bar {
+        height: 3px;
+        background: var(--paper-sunken);
+      }
+
+      .score__fill {
+        height: 100%;
+        background: var(--accent);
+      }
+
+      .score__val {
+        text-align: right;
+        font-family: var(--font-mono);
+      }
+
+      .evidence {
+        border: 1px solid var(--rule);
+        background: var(--paper-raised);
+        padding: 14px;
+      }
+
+      .evidence__label {
+        color: var(--ink-3);
+        font-size: 11px;
+        letter-spacing: 0.05em;
+      }
+
+      .evidence__item {
+        margin-top: 10px;
+        padding-left: 10px;
+        border-left: 1px solid var(--accent-line);
+        color: var(--ink-2);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        line-height: 1.75;
+        overflow-wrap: anywhere;
+      }
+
+      .evidence__item--missing {
+        border-left-color: var(--warn);
+        color: var(--warn);
+      }
+
+      /* 适用面 */
+      .scope {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0 48px;
+        margin-top: 36px;
+      }
+
+      .scope__group {
+        padding: 18px 0;
+        border-top: 1px solid var(--rule);
+      }
+
+      .scope__group h3 {
+        font-size: 13px;
+        letter-spacing: 0.03em;
+        color: var(--ink-3);
+        font-weight: 500;
+      }
+
+      .scope__group ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 0;
+        margin-top: 10px;
+      }
+
+      .scope__group li {
+        color: var(--ink-2);
+        font-size: 14px;
+        width: 50%;
+      }
+
+      .scope__group li::before {
+        content: '·';
+        margin-right: 7px;
+        color: var(--ink-4);
+      }
+
+      /* FAQ */
+      .faq {
+        margin-top: 36px;
+        border-top: 1px solid var(--rule);
+      }
+
+      .faq details {
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .faq summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 0;
+        cursor: pointer;
+        font-size: 15px;
+        color: var(--ink);
+        list-style: none;
+      }
+
+      .faq summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .faq summary::after {
+        content: '+';
+        color: var(--ink-4);
+        font-family: var(--font-mono);
+        font-size: 16px;
+      }
+
+      .faq details[open] summary::after {
+        content: '−';
+      }
+
+      .faq p {
+        max-width: 52em;
+        padding: 0 0 18px;
+        color: var(--ink-2);
+        font-size: 14px;
+        line-height: 1.8;
+      }
+
+      /* 结尾 */
+      .cta {
+        padding: 80px 0;
+        text-align: center;
+      }
+
+      .cta h2 {
+        max-width: 22em;
+        margin: 0 auto;
+      }
+
+      .cta p {
+        max-width: 34em;
+        margin: 14px auto 0;
+        color: var(--ink-2);
+      }
+
+      .cta__actions {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 28px;
+      }
+
+      /* 页脚 */
+      .foot {
+        border-top: 1px solid var(--rule);
+        padding: 30px 0 44px;
+      }
+
+      .foot__inner {
+        display: flex;
+        align-items: baseline;
+        gap: 20px;
+        flex-wrap: wrap;
+        color: var(--ink-4);
+        font-size: 12px;
+      }
+
+      .foot__links {
+        display: flex;
+        gap: 16px;
+        margin-left: auto;
+        flex-wrap: wrap;
+      }
+
+      .foot__links a {
+        color: var(--ink-3);
+        text-decoration: none;
+      }
+
+      .foot__links a:hover {
+        color: var(--ink);
+      }
+
+      @media (max-width: 900px) {
+        .wrap {
+          padding: 0 18px;
+        }
+
+        .hero {
+          padding: 44px 0 40px;
+        }
+
+        h1 {
+          font-size: clamp(27px, 8vw, 34px);
+          line-height: 1.3;
+        }
+
+        .hero__lead {
+          margin-top: 16px;
+          font-size: 15px;
+          line-height: 1.75;
+        }
+
+        .hero__actions {
+          margin-top: 24px;
+        }
+
+        .hero__meta {
+          gap: 10px 18px;
+          margin-top: 20px;
+          font-size: 11.5px;
+        }
+
+        .btn {
+          height: 44px;
+          padding: 0 18px;
+        }
+
+        /*
+         * 必须是 minmax(0, 1fr) 而不是 1fr。
+         * `1fr` 的最小值是 auto（≈ min-content），而日志示例里有不换行的长行，
+         * 会把整列撑到 540px 以上——在 390px 屏幕上直接横向溢出，
+         * 标题与正文右侧被裁掉。这是实测量出来的，不是猜的。
+         */
+        .hero__inner,
+        .verdict {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 32px;
+        }
+
+        .pillars,
+        .steps {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        /* 工作台示意：会话栏变横向标签，主列与案卷纵向叠放 */
+        .workspace {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .workspace__rail {
+          flex-direction: row;
+          gap: 6px;
+          overflow-x: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--rule);
+          scrollbar-width: none;
+        }
+
+        .workspace__rail::-webkit-scrollbar {
+          display: none;
+        }
+
+        .workspace__rail-head {
+          display: none;
+        }
+
+        .workspace__rail-item {
+          flex: none;
+          width: auto;
+          white-space: nowrap;
+        }
+
+        .workspace__stage,
+        .workspace__scene {
+          min-height: 0;
+        }
+
+        .workspace__scene,
+        .workspace__scene.is-active {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .workspace__dossier {
+          border-left: 0;
+          border-top: 1px solid var(--rule);
+        }
+
+        .workspace__notes {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .workspace__notes li {
+          padding: 16px 0;
+        }
+
+        .workspace__notes li + li {
+          padding-left: 0;
+          border-left: 0;
+          border-top: 1px solid var(--rule);
+        }
+
+        .pillar {
+          padding: 20px 0;
+          margin-right: 0 !important;
+          border-right: 0;
+          border-bottom: 1px solid var(--rule);
+        }
+
+        .pillar:last-child {
+          border-bottom: 0;
+        }
+
+        .step {
+          border-right: 0;
+          border-bottom: 1px solid var(--rule);
+        }
+
+        .step:last-child {
+          border-bottom: 0;
+        }
+
+        .section {
+          padding: 52px 0;
+        }
+
+        .scope {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .scope__group li {
+          width: 100%;
+        }
+
+        .nav__links a:not(.nav__cta) {
+          display: none;
+        }
+
+        .nav__inner {
+          gap: 12px;
+          height: 52px;
+        }
+
+        .nav__cta {
+          height: 36px;
+          padding: 0 12px;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .specimen__body {
+          font-size: 10.5px;
+          line-height: 1.85;
+        }
+
+        .ln {
+          gap: 10px;
+          padding: 0 10px;
+        }
+
+        .ln__no {
+          width: 2.4em;
+        }
+
+        .specimen__foot {
+          font-size: 10.5px;
+          line-height: 1.6;
+        }
+
+        .verdict__root {
+          font-size: 17px;
+        }
+
+        .section {
+          padding: 46px 0;
+        }
+
+        .section__head {
+          gap: 10px;
+        }
+
+        .section__lead {
+          font-size: 14.5px;
+        }
+
+        .faq summary {
+          font-size: 14.5px;
+          padding: 14px 0;
+        }
+
+        .cta {
+          padding: 56px 0;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        * {
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav__inner">
+        <a class="brand" href="/">LogRAG+</a>
+        <nav class="nav__links" aria-label="导航">
+          <a href="#workspace">界面</a>
+          <a href="#how">怎么用</a>
+          <a href="#verdict">会给出什么</a>
+          <a href="#scope">覆盖范围</a>
+          <a href="#faq">常见问题</a>
+          <a class="nav__cta" href="/logshare/">开始排障</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="wrap hero__inner">
+          <div>
+            <p class="eyebrow">MINECRAFT 日志排障</p>
+            <h1>把崩溃日志读成一份可执行的结论。</h1>
+            <p class="hero__lead">
+              不是再给你一段「可能是模组冲突」的猜测。LogRAG+ 会指出根因，
+              给出能照着做的步骤，并把依据标到日志的哪一行——
+              找不到明确原因时，它会直接说找不到。
+            </p>
+            <div class="hero__actions">
+              <a class="btn btn--primary" href="/logshare/">
+                开始分析
+                <span aria-hidden="true">→</span>
+              </a>
+              <a class="btn" href="#how">看看它怎么工作</a>
+            </div>
+            <div class="hero__meta">
+              <span><b>无登录</b> 打开即用</span>
+              <span><b>只读</b> 日志不落本地</span>
+              <span><b>可核对</b> 证据回到日志行</span>
+            </div>
+          </div>
+
+          <figure class="specimen" aria-label="日志示例">
+            <figcaption class="specimen__head">
+              <span class="specimen__dot" aria-hidden="true"></span>
+              crash-report.txt · kalkLqQ
+            </figcaption>
+            <div class="specimen__body" role="img" aria-label="崩溃日志片段，故障帧被标出">
+              <div class="ln ln--dim"><span class="ln__no">14</span><span class="ln__t">GL info: MobileGlues 1.3.2 / OpenGL ES 3.2</span></div>
+              <div class="ln ln--err"><span class="ln__no">16</span><span class="ln__t">Failed to create OpenGL context</span></div>
+              <div class="ln ln--dim"><span class="ln__no">17</span><span class="ln__t">  at org.lwjgl.opengl.GL.createCapabilities(GL.java:482)</span></div>
+              <div class="ln ln--err"><span class="ln__no">21</span><span class="ln__t">[main/ERROR]: Game crashed</span></div>
+              <div class="ln ln--dim"><span class="ln__no">32</span><span class="ln__t"># A fatal error has been detected by the JRE</span></div>
+              <div class="ln ln--mark"><span class="ln__no">36</span><span class="ln__t"># Problematic frame:</span></div>
+              <div class="ln ln--mark"><span class="ln__no">37</span><span class="ln__t"># C  [libmobileglues.so+0x593060]</span></div>
+            </div>
+            <div class="specimen__verdict">
+              <span class="specimen__verdict-tag">判定</span>
+              <p class="specimen__verdict-text">
+                当前渲染器与游戏版本不匹配，导致 OpenGL 上下文创建失败。
+              </p>
+              <div class="specimen__verdict-foot">
+                <span>依据</span>
+                <code>crash-report.txt:37</code>
+                <span class="specimen__verdict-arrow" aria-hidden="true">↗</span>
+              </div>
+            </div>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section" id="how">
+        <div class="wrap">
+          <div class="section__head">
+            <span class="section__no">01</span>
+            <h2>三步，不需要懂日志格式。</h2>
+          </div>
+          <p class="section__lead">
+            直接把日志丢进来就行。它可以是启动器里的 <code>latest.log</code>、
+            崩溃报告，或一整个 ZIP。
+          </p>
+
+          <ol class="steps">
+            <li class="step">
+              <span class="step__no">01</span>
+              <h3>给出日志</h3>
+              <p>粘贴、上传，或从 LogShare 日志详情页一键跳转。ZIP 在本地解压后逐份上传；已有对话时，输入区的加号就是「追加材料」。</p>
+            </li>
+            <li class="step">
+              <span class="step__no">02</span>
+              <h3>它去查，而不是猜</h3>
+              <p>
+                先定位崩溃锚点，再检索知识库、模组仓库与公开资料。
+                每一步检索过程都可见，失败也会标出来。
+              </p>
+            </li>
+            <li class="step">
+              <span class="step__no">03</span>
+              <h3>拿到能照做的结论</h3>
+              <p>
+                判定、处置、依据分开呈现。依据可以点回日志对应行；
+                核对不上的条目会被明确标为「未核对到」。
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section--tint" id="workspace">
+        <div class="wrap">
+          <div class="section__head">
+            <span class="section__no">02</span>
+            <h2>对话、结论、案卷，在同一屏。</h2>
+          </div>
+          <p class="section__lead">
+            不是把日志丢给模型换一段文字。左边是对话，中间是调查过程与结论，
+            右边是原始材料——引用能点回行号，补充材料也不会打断会话。
+          </p>
+
+          <div
+            class="workspace"
+            data-preview
+            aria-label="LogRAG+ 工作台交互预览：可切换示例会话、展开调查步骤、点击依据定位日志行"
+          >
+            <div class="workspace__rail" role="tablist" aria-label="示例会话">
+              <span class="workspace__rail-head">示例会话</span>
+              <button
+                type="button"
+                class="workspace__rail-item is-active"
+                role="tab"
+                aria-selected="true"
+                aria-controls="ws-scene-0"
+                data-goto="0"
+              >
+                <span>这份日志为什么崩溃？</span>
+                <span class="workspace__rail-meta">kalkLqQ · 12 次检索</span>
+              </button>
+              <button
+                type="button"
+                class="workspace__rail-item"
+                role="tab"
+                aria-selected="false"
+                aria-controls="ws-scene-1"
+                data-goto="1"
+              >
+                <span>装完模组进不去世界</span>
+                <span class="workspace__rail-meta">fabric · 8 次检索</span>
+              </button>
+              <button
+                type="button"
+                class="workspace__rail-item"
+                role="tab"
+                aria-selected="false"
+                aria-controls="ws-scene-2"
+                data-goto="2"
+              >
+                <span>启动器直接退出</span>
+                <span class="workspace__rail-meta">launcher · 6 次检索</span>
+              </button>
+            </div>
+
+            <div class="workspace__stage">
+              <!-- 场景 1：渲染器不匹配 -->
+              <div class="workspace__scene is-active" id="ws-scene-0" data-scene="0" role="tabpanel">
+                <div class="workspace__main">
+                  <div class="workspace__meta">LogRAG+ · 分析完成 · 12 次检索</div>
+                  <p class="workspace__user">这份日志为什么崩溃？</p>
+                  <div class="workspace__trace">
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>1</b> 定位崩溃锚点
+                      <span class="workspace__step-result">SIGSEGV · 故障帧在 libmobileglues.so</span>
+                    </button>
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>2</b> 检索 MobileGlues 兼容性
+                      <span class="workspace__step-result">知识库与仓库共命中 3 条</span>
+                    </button>
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>3</b> 核对游戏版本与渲染器矩阵
+                      <span class="workspace__step-result">当前组合不在已适配列表内</span>
+                    </button>
+                  </div>
+                  <div class="workspace__verdict">
+                    <span class="workspace__verdict-tag">判定</span>
+                    <p>当前渲染器与游戏版本不匹配，导致 OpenGL 上下文创建失败。</p>
+                    <div class="workspace__verdict-steps">
+                      1. 切换到已适配的 MobileGlues 版本<br />
+                      2. 清除着色器缓存后重启<br />
+                      3. 仍崩溃则回退一档游戏版本
+                    </div>
+                    <div class="workspace__anchors">
+                      <span class="workspace__anchors-label">依据</span>
+                      <button type="button" class="workspace__anchor" data-ref="crash-37">
+                        crash-report.txt:37
+                      </button>
+                      <button type="button" class="workspace__anchor" data-ref="log-16">
+                        latest.log:16
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="workspace__dossier">
+                  <div class="workspace__dossier-head">材料 · 合并正文</div>
+                  <div class="workspace__dossier-body">
+                    <span class="is-doc">===== crash-report.txt =====</span>
+                    <span>36  # Problematic frame:</span>
+                    <span data-ref="crash-37">37  # C  [libmobileglues.so+0x593060]</span>
+                    <span class="is-doc">===== latest.log =====</span>
+                    <span>14  GL info: MobileGlues 1.3.2</span>
+                    <span data-ref="log-16">16  Failed to create OpenGL context</span>
+                    <span>17    at org.lwjgl.opengl.GL</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 场景 2：缺少前置模组 -->
+              <div class="workspace__scene" id="ws-scene-1" data-scene="1" role="tabpanel">
+                <div class="workspace__main">
+                  <div class="workspace__meta">LogRAG+ · 分析完成 · 8 次检索</div>
+                  <p class="workspace__user">装完模组进不去世界，是哪一步错了？</p>
+                  <div class="workspace__trace">
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>1</b> 读取模组加载日志
+                      <span class="workspace__step-result">latest.log:214 · 47 个模组</span>
+                    </button>
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>2</b> 检索依赖声明
+                      <span class="workspace__step-result">sodium-extra 要求 fabric-api 0.92.2+</span>
+                    </button>
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>3</b> 核对已安装版本
+                      <span class="workspace__step-result">fabric-api 未安装</span>
+                    </button>
+                  </div>
+                  <div class="workspace__verdict">
+                    <span class="workspace__verdict-tag">判定</span>
+                    <p>缺少 Fabric API，加载器在构建模组图时中止。</p>
+                    <div class="workspace__verdict-steps">
+                      1. 安装与游戏版本一致的 Fabric API<br />
+                      2. 删除重复的旧版本<br />
+                      3. 重启并确认模组列表
+                    </div>
+                    <div class="workspace__anchors">
+                      <span class="workspace__anchors-label">依据</span>
+                      <button type="button" class="workspace__anchor" data-ref="log-214">
+                        latest.log:214
+                      </button>
+                      <button type="button" class="workspace__anchor" data-ref="log-216">
+                        latest.log:216
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="workspace__dossier">
+                  <div class="workspace__dossier-head">材料 · latest.log</div>
+                  <div class="workspace__dossier-body">
+                    <span>212 [main/INFO]: Loading 47 mods</span>
+                    <span data-ref="log-214">214 [main/ERROR]: Mod 'sodium-extra'</span>
+                    <span>215   requires fabric-api 0.92.2+</span>
+                    <span data-ref="log-216">216 [main/ERROR]: Incompatible mod set!</span>
+                    <span>218 net.fabricmc.loader.api</span>
+                    <span>219   .ModResolutionException</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 场景 3：Java 版本过低 -->
+              <div class="workspace__scene" id="ws-scene-2" data-scene="2" role="tabpanel">
+                <div class="workspace__main">
+                  <div class="workspace__meta">LogRAG+ · 分析完成 · 6 次检索</div>
+                  <p class="workspace__user">启动器点开始就退出，也没有崩溃报告。</p>
+                  <div class="workspace__trace">
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>1</b> 检查启动器日志尾部
+                      <span class="workspace__step-result">launcher.log:88 · 退出码 1</span>
+                    </button>
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>2</b> 查找崩溃报告
+                      <span class="workspace__step-result">未生成 crash-report</span>
+                    </button>
+                    <button type="button" class="workspace__step" aria-expanded="false">
+                      <b>3</b> 核对 JVM 与模组要求
+                      <span class="workspace__step-result">Java 17 / 模组要求 21</span>
+                    </button>
+                  </div>
+                  <div class="workspace__verdict">
+                    <span class="workspace__verdict-tag">判定</span>
+                    <p>Java 版本低于模组要求，JVM 在类加载阶段退出。</p>
+                    <div class="workspace__verdict-steps">
+                      1. 在启动器里切换到 Java 21<br />
+                      2. 清理旧的 JVM 参数<br />
+                      3. 重新启动并观察加载日志
+                    </div>
+                    <div class="workspace__anchors">
+                      <span class="workspace__anchors-label">依据</span>
+                      <button type="button" class="workspace__anchor" data-ref="launcher-88">
+                        launcher.log:88
+                      </button>
+                      <button type="button" class="workspace__anchor" data-ref="hs-9">
+                        hs_err_pid.log:9
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="workspace__dossier">
+                  <div class="workspace__dossier-head">材料 · 合并正文</div>
+                  <div class="workspace__dossier-body">
+                    <span class="is-doc">===== launcher.log =====</span>
+                    <span>86  [Launcher] Java: 17.0.9</span>
+                    <span data-ref="launcher-88">88  [Launcher] Process exited code 1</span>
+                    <span>90  [Launcher] No crash report</span>
+                    <span class="is-doc">===== hs_err_pid.log =====</span>
+                    <span data-ref="hs-9">9   UnsupportedClassVersionError</span>
+                    <span>10  compiled by a newer version</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <ul class="workspace__notes">
+            <li>
+              <b>追加材料</b>
+              已有对话里点加号补一份崩溃报告，会话与链接都不变，下一轮自动读到合并正文。
+            </li>
+            <li>
+              <b>追问可作答</b>
+              缺少关键信息时它会停下来问，回答后继续；刷新或换设备也不会丢。
+            </li>
+            <li>
+              <b>证据可回跳</b>
+              结论里的引用点回日志行；核对不上的条目会明确标注，而不是装作有依据。
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section" id="verdict">
+        <div class="wrap">
+          <div class="section__head">
+            <span class="section__no">03</span>
+            <h2>结论长这样，而不是一段散文。</h2>
+          </div>
+          <p class="section__lead">
+            玩家先要知道「该动哪一处」。依据是支撑，不是主角，所以默认收起。
+          </p>
+
+          <div class="verdict">
+            <div class="verdict__main">
+              <p class="verdict__label">判定</p>
+              <p class="verdict__root">
+                当前渲染器与游戏版本不匹配，导致 OpenGL 上下文创建失败。
+              </p>
+
+              <div class="verdict__steps">
+                <div class="vstep">
+                  <span class="vstep__no">01</span>
+                  <span class="vstep__text">在启动器的渲染器设置里，切换到该版本已适配的 MobileGlues 版本。</span>
+                </div>
+                <div class="vstep">
+                  <span class="vstep__no">02</span>
+                  <span class="vstep__text">清除着色器缓存后重新启动。首次进入会重新编译，卡顿属正常。</span>
+                </div>
+                <div class="vstep">
+                  <span class="vstep__no">03</span>
+                  <span class="vstep__text">若仍崩溃，回退到低一档的游戏版本，等渲染器适配。</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="verdict__side">
+              <div class="score">
+                <div class="score__head">
+                  <span class="score__num">91</span>
+                  <span class="score__tag">可交付</span>
+                </div>
+                <div class="score__rows">
+                  <div class="score__row">
+                    <span>证据</span>
+                    <span class="score__bar"><span class="score__fill" style="width: 86%"></span></span>
+                    <span class="score__val">86</span>
+                  </div>
+                  <div class="score__row">
+                    <span>核实</span>
+                    <span class="score__bar"><span class="score__fill" style="width: 100%"></span></span>
+                    <span class="score__val">100</span>
+                  </div>
+                  <div class="score__row">
+                    <span>可行</span>
+                    <span class="score__bar"><span class="score__fill" style="width: 92%"></span></span>
+                    <span class="score__val">92</span>
+                  </div>
+                  <div class="score__row">
+                    <span>效率</span>
+                    <span class="score__bar"><span class="score__fill" style="width: 100%"></span></span>
+                    <span class="score__val">100</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="evidence">
+                <p class="evidence__label">依据</p>
+                <p class="evidence__item">crash-report.txt:37 Problematic frame: C [libmobileglues.so+0x593060]</p>
+                <p class="evidence__item">latest.log:16 Failed to create OpenGL context</p>
+                <p class="evidence__item evidence__item--missing">未核对到：MobileGlues 0.3.2</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="wrap">
+          <div class="section__head">
+            <span class="section__no">04</span>
+            <h2>三件它刻意不做的事。</h2>
+          </div>
+
+          <div class="pillars">
+            <article class="pillar">
+              <h3>不编造原因</h3>
+              <p>
+                日志里没有证据时，它会说「无法核实」，并告诉你还需要什么信息。
+                条目级的未命中锚点会单独列出。
+              </p>
+            </article>
+            <article class="pillar">
+              <h3>不只给文件路径</h3>
+              <p>
+                移动端的应用私有目录用户根本进不去。处置步骤给的是界面路径，
+                例如「设置 → 渲染器」，而不是 <code>/data/user/0/…</code>。
+              </p>
+            </article>
+            <article class="pillar">
+              <h3>不保存你的原文</h3>
+              <p>
+                上传的日志经脱敏后托管在 LogShare；粘贴分析的正文只存在当前页面内存里，
+                刷新即丢，不写本地存储。
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="scope">
+        <div class="wrap">
+          <div class="section__head">
+            <span class="section__no">05</span>
+            <h2>覆盖移动端、PC 与服务端。</h2>
+          </div>
+          <p class="section__lead">
+            知识条目按「Minecraft 问题」组织，而不是按启动器分家——
+            同一个渲染器兼容问题，在 FCL、ZL2、Pojav 上的表现本来就一样。
+          </p>
+
+          <div class="scope">
+            <div class="scope__group">
+              <h3>移动端</h3>
+              <ul>
+                <li>ZalithLauncher2</li>
+                <li>FoldCraftLauncher</li>
+                <li>Pojav 系</li>
+                <li>Amethyst</li>
+                <li>渲染器：MobileGlues / ANGLE / LTW</li>
+                <li>SDL3 迁移与原生库缺失</li>
+              </ul>
+            </div>
+            <div class="scope__group">
+              <h3>PC 端</h3>
+              <ul>
+                <li>HMCL</li>
+                <li>PrismLauncher / MultiMC</li>
+                <li>ATLauncher / PCL2</li>
+                <li>Java 运行时错配</li>
+                <li>光影与着色器</li>
+                <li>模组依赖与版本冲突</li>
+              </ul>
+            </div>
+            <div class="scope__group">
+              <h3>服务端</h3>
+              <ul>
+                <li>Paper / Purpur</li>
+                <li>Folia / Velocity</li>
+                <li>Geyser</li>
+                <li>Fabric / NeoForge 服务端</li>
+                <li>插件与端口</li>
+                <li>区块与存档</li>
+              </ul>
+            </div>
+            <div class="scope__group">
+              <h3>生态问题</h3>
+              <ul>
+                <li>Mixin 注入失败</li>
+                <li>模组缺前置</li>
+                <li>资源包版本不符</li>
+                <li>内存不足</li>
+                <li>原生库 ABI 不匹配</li>
+                <li>反混淆后的类名恢复</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="faq">
+        <div class="wrap">
+          <div class="section__head">
+            <span class="section__no">06</span>
+            <h2>常见问题。</h2>
+          </div>
+
+          <div class="faq">
+            <details open>
+              <summary>需要登录或付费吗？</summary>
+              <p>
+                不需要登录，也不收费。配额按设备与网络做软限制，
+                目的是控制模型成本；达到上限时对话会降级为快速模式，而不是直接拒绝。
+              </p>
+            </details>
+            <details>
+              <summary>日志会上传到哪？</summary>
+              <p>
+                上传的日志交给 LogShare 处理：先脱敏（IP、路径、用户名），
+                再去重、异步反混淆与安全审核。LogRAG+ 本身不保存日志原文，
+                只保存对话与分析记录。直接粘贴的正文只在当前页面内存中。
+              </p>
+            </details>
+            <details>
+              <summary>为什么要等几秒才有结果？</summary>
+              <p>
+                它在检索而不是空想：读崩溃锚点、查知识库、必要时查模组仓库。
+                这些步骤会显示在「调查过程」里，可以看到它到底查了什么。
+              </p>
+            </details>
+            <details>
+              <summary>结论里的「未核对到」是什么意思？</summary>
+              <p>
+                模型声称某个引用是依据，但系统在日志正文与检索结果里没有找到原文。
+                这类条目会被列出，交给你判断——而不是替它圆过去。
+              </p>
+            </details>
+            <details>
+              <summary>可以指定自己的模型吗？</summary>
+              <p>
+                可以。设置里支持 OpenAI 兼容端点，密钥只保存在本机浏览器，
+                随请求发送，不写入服务端。
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="cta">
+        <div class="wrap">
+          <h2>下一次崩溃，别再从第一行开始读。</h2>
+          <p>把日志放进来，先看结论，再决定要不要顺着依据往下查。</p>
+          <div class="cta__actions">
+            <a class="btn btn--primary" href="/logshare/">
+              打开 LogRAG+
+              <span aria-hidden="true">→</span>
+            </a>
+            <a class="btn" href="/logshare/admin">管理台</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap foot__inner">
+        <span>LogRAG+ · 独立的 Minecraft 日志排障服务</span>
+        <span class="mono">agent.logshare.cn</span>
+        <nav class="foot__links" aria-label="页脚">
+          <a href="/logshare/">开始分析</a>
+          <a href="/logshare/admin">管理台</a>
+          <a href="/health">服务状态</a>
+        </nav>
+      </div>
+    </footer>
+    <script>
+      /*
+       * 工作台预览的微交互：切换示例会话、展开调查步骤、点依据回跳日志行。
+       *
+       * 三个场景的 DOM 全部写在 HTML 里，脚本只切类名——无 JS 时第一幕仍然完整，
+       * 也不会用 innerHTML 拼接内容。
+       */
+      (() => {
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+        document.querySelectorAll('[data-preview]').forEach((root) => {
+          const tabs = Array.from(root.querySelectorAll('[data-goto]'))
+          const scenes = Array.from(root.querySelectorAll('[data-scene]'))
+
+          const select = (index) => {
+            tabs.forEach((tab, i) => {
+              const active = i === index
+              tab.classList.toggle('is-active', active)
+              tab.setAttribute('aria-selected', String(active))
+              if (active) tab.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+            })
+            scenes.forEach((scene, i) => {
+              const active = i === index
+              scene.classList.toggle('is-active', active)
+              if (!active) return
+              scene.classList.remove('is-enter')
+              void scene.offsetWidth
+              scene.classList.add('is-enter')
+            })
+          }
+
+          tabs.forEach((tab, i) => {
+            tab.addEventListener('click', () => select(i))
+          })
+
+          root.querySelectorAll('.workspace__step').forEach((step) => {
+            step.addEventListener('click', () => {
+              const open = step.classList.toggle('is-open')
+              step.setAttribute('aria-expanded', String(open))
+            })
+          })
+
+          root.querySelectorAll('.workspace__anchor').forEach((anchor) => {
+            const scene = anchor.closest('[data-scene]')
+            const ref = anchor.getAttribute('data-ref')
+            const line = scene ? scene.querySelector('[data-ref="' + ref + '"]') : null
+            if (!line) return
+
+            const mark = () => line.classList.add('is-hot')
+            const unmark = () => line.classList.remove('is-hot')
+
+            anchor.addEventListener('mouseenter', mark)
+            anchor.addEventListener('mouseleave', unmark)
+            anchor.addEventListener('focus', mark)
+            anchor.addEventListener('blur', unmark)
+            anchor.addEventListener('click', () => {
+              // 只做行内高亮，不调用 scrollIntoView：演示区的案卷很短，
+              // 页面级滚动反而会把整块预览顶出视口，打断阅读。
+              line.classList.remove('is-flash')
+              void line.offsetWidth
+              line.classList.add('is-flash')
+              window.setTimeout(() => line.classList.remove('is-flash'), 1200)
+            })
+          })
+
+          // 进入视口时轻微入场。放在 JS 里而不是 CSS 默认值：
+          // 脚本没跑时内容必须照样可见。
+          if (reduce || !('IntersectionObserver' in window)) return
+          const io = new IntersectionObserver(
+            (entries) => {
+              for (const entry of entries) {
+                if (!entry.isIntersecting) continue
+                root.classList.add('is-live')
+                io.disconnect()
+              }
+            },
+            { threshold: 0.3 },
+          )
+          io.observe(root)
+        })
+      })()
+    </script>
+  </body>
+</html>
