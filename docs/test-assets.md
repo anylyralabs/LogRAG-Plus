@@ -8,7 +8,7 @@
 |---|---|---|
 | 27 份真实日志 | `LogShare/testlogs/` | 5.5MB，用户提供 |
 
-## 本地实测产物（`/data/data/com.termux/files/usr/tmp/lstest/`）
+## 本地实测产物（`/tmp/lstest/`）
 
 | 资产 | 说明 |
 |---|---|
@@ -17,7 +17,7 @@
 | `progress.log` / `index.jsonl` | 批量进度与上传 ID |
 | `*.id` | 各样本的 LogShare 日志 ID |
 
-## 探查与分析脚本（`/data/data/com.termux/files/usr/tmp/`）
+## 探查与分析脚本（`/tmp/`）
 
 | 脚本 | 用途 |
 |---|---|
@@ -32,8 +32,8 @@
 
 | 文件 | 位置 |
 |---|---|
-| `Config.inc.php` 实测前备份 | `/data/data/com.termux/files/usr/tmp/Config.inc.php.bak` |
-| `.env` 备份 | `/data/data/com.termux/files/usr/tmp/env.bak` |
+| `Config.inc.php` 实测前备份 | `/tmp/Config.inc.php.bak` |
+| `.env` 备份 | `/tmp/env.bak` |
 
 实测改动（`Config.inc.php`，gitignored）：`storageId=f`、`cache.enabled=false`、
 `ai.rag.enabled=false`（embedding 不可用）、`eventQueue.enabled=false`。
@@ -50,6 +50,6 @@
 ## 重跑一条实测
 
 ```bash
-cd /data/data/com.termux/files/home/Project/LogRAG-Plus
-npx tsx scripts/e2e-test.ts /data/data/com.termux/files/home/LogShare/testlogs/<file> "问题"
+cd /home/YanSui/Project/LogRAG-Plus
+npx tsx scripts/e2e-test.ts /home/YanSui/LogShare/testlogs/<file> "问题"
 ```

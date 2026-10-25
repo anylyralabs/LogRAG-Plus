@@ -8,7 +8,12 @@ data/
 coverage/
 tmp/
 
-# Nuxt 构建产物
+# 前端构建产物
+web/dist/
+web/node_modules/
+web/.vite/
+web/tsconfig.tsbuildinfo
+# 旧 Nuxt 时代的产物（保留条目，避免历史目录被误提交）
 web/.output/
 web/.nuxt/
 web/.data/

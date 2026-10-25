@@ -33,13 +33,13 @@
 
 | 事项 | 值 |
 |---|---|
-| 项目根 | `/data/data/com.termux/files/home/Project/LogRAG-Plus` |
+| 项目根 | `/home/YanSui/Project/LogRAG-Plus` |
 | 线上 SSH | `ssh logshare`（**服务器默认 shell 是 fish**：一律 `ssh logshare -- bash -c '...'`；复杂逻辑**必须**本地写脚本 → scp → 执行，嵌套引号必炸） |
 | 线上目录 | `/home/YanSui/LogShare` |
 | 容器 | `logshare-hyperf` / `logshare-nginx` / `logshare-redis` / `logshare-mariadb` / `logshare-acme` |
 | **Redis 容器无 bash** | 必须用 `sh -c` |
 | DB 凭据 | 容器内环境变量 `$MARIADB_ROOT_PASSWORD`（**不要打印到输出**） |
-| 临时目录 | 系统 `/tmp` 只读 → 用 `/data/data/com.termux/files/usr/tmp/` |
+| 临时目录 | 系统 `/tmp` 只读 → 用 `/tmp/` |
 | 本地模型 | `http://127.0.0.1:8765/v1`（**当前未启动**） |
 | LogShare 本地 | `http://127.0.0.1:9501`（**当前未启动**） |
 | LogRAG+ | `http://127.0.0.1:8788` |

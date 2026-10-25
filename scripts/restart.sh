@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 #
 # 重启 LogRAG+ 服务。
 #
@@ -15,8 +15,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-PIDFILE=/data/data/com.termux/files/usr/tmp/lograg-server.pid
-LOG=/data/data/com.termux/files/usr/tmp/lograg-server.log
+PIDFILE=/tmp/lograg-server.pid
+LOG=/tmp/lograg-server.log
 READY_TIMEOUT=60
 
 PORT_ARG="${PORT:-}"

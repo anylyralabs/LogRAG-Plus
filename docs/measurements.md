@@ -1,7 +1,7 @@
 # 实测数据总表（27 份真实移动端日志 + 性能/检索/生态验证）
 
 > 数据来源：2026-10-15/16 两轮实测。原始 SSE 与解析结果在
-> `/data/data/com.termux/files/usr/tmp/lstest/`（`sse/*.sse` + `*.json`）。
+> `/tmp/lstest/`（`sse/*.sse` + `*.json`）。
 > 资产清单见 `docs/test-assets.md`。
 
 ## 1. 27 份日志清单（`LogShare/testlogs/`，共 5.5MB）
