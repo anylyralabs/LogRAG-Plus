@@ -462,7 +462,7 @@ LogShare 的分析记录是「Redis ZSET + 602MB 单文件归档」。任何统�
 |---|---|
 | **CPU 密集工具必须进 worker 线程** | 实测：10MB 日志 grep 导致事件循环停顿 **1423ms**。`readLog`/`grepLog` 必须用 `worker_threads` |
 | **`node:sqlite` 可直接复用 RAG 索引** | 实测：Node 24 内置 SQLite 3.53.0 与 PHP `pdo_sqlite` 版本一致，FTS5 / `bm25()` / BLOB 全兼容 |
-| **反混淆走 SpinYarn C ABI** | koffi 直调 `libspinyarn_capi.so`，与 LogShare 共用 mappings（`SPINYARN_MAPPINGS_DIR`）与 Redis 缓存（`SPINYARN_REDIS_URL`）；未配置或调用失败一律 fail-open。版本识别必须覆盖启动器日志（FCL/Pojav 只把版本写在 classpath 的 `intermediary/1.20.1/`），否则移动端日志永远不会反混淆——`detectVersion()` 已覆盖 7 种来源并有回归测试 |
+| **反混淆走 SpinYarn C ABI** | koffi 直调 `libspinyarn_capi.so`，与 LogShare 共用 mappings（`SPINYARN_MAPPINGS_DIR`）与 Redis 缓存（`SPINYARN_REDIS_URL`）；未配置或调用失败一律 fail-open；镜像基础用 Debian slim（glibc），换 alpine 必须同时编 musl 目标并重装 koffi。版本识别必须覆盖启动器日志（FCL/Pojav 只把版本写在 classpath 的 `intermediary/1.20.1/`），否则移动端日志永远不会反混淆——`detectVersion()` 已覆盖 7 种来源并有回归测试 |
 | **依赖体积** | `deepagents` + LangChain 全栈 `node_modules` 137MB，导入后 RSS 169MB |
 
 ## 验证命令

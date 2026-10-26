@@ -10,7 +10,11 @@
 #   1. 在仓库根准备好 `.env`（本文件用 env_file 读取；它已被 gitignore）
 #   2. 确认 `data/rag/index.db` 存在（不存在则先在宿主机 `npx tsx src/rag/build-cli.ts`）
 #   3. docker compose -f docker/compose.yaml up -d --build
-#   4. 在反代里把 agent.logshare.cn 指到 127.0.0.1:8788
+#   4. 在反代里把域名指到 127.0.0.1:8788
+#
+# ⚠️ `.env` 里的 `DB_HOST` 必须是**容器内可达**的地址：同机 compose 用数据库服务名，
+#    宿主机数据库用 `host.docker.internal`（需加 extra_hosts）或宿主内网 IP。
+#    写 `127.0.0.1` 在容器里指向容器自身，启动迁移会直接失败。
 #
 # 端口刻意只绑回环：反代与服务同机，绑 0.0.0.0 等于把无鉴权的接口直接暴露到公网。
 # 若反代在另一个容器里，删掉 ports、改用下方注释的 networks（用容器名互访）。
@@ -38,11 +42,16 @@ services:
       - "127.0.0.1:8788:8788"
 
     volumes:
-      # 会话/上传副本/分析记录：必须持久化，否则容器重建即丢
+      # 本地状态（敏感词加密密钥、语料等）。业务数据在 MariaDB，不在这个卷里；
+      # 但 `.secret` 丢了会导致既有落盘密文无法解密，仍必须持久化。
       - lograg-data:/app/data
       # RAG 索引：只读挂入。索引是构建产物，由宿主机重建后本服务自动感知
       # （search.ts 按 mtime 变更重连），因此不需要重启容器。
       - ../data/rag/index.db:/app/rag-index/index.db:ro
+      # 反混淆动态库：与镜像 libc 匹配（本镜像为 glibc）。宿主没有该文件时不挂载，
+      # 服务会按未配置处理，不影响分析。
+      # - /opt/SpinYarn/target/release/libspinyarn_capi.so:/app/libspinyarn_capi.so:ro
+      # - /opt/mappings:/app/mappings:ro
 
     # 反代在别的容器时启用（把 logshare_default 换成实际网络名）：
     # networks:

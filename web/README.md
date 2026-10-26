@@ -7,7 +7,7 @@ Vue 3 + Vite + TypeScript，构建产物由后端托管在 `/logshare/` 子路�
 
 ```bash
 cd web
-npm install          # 用 npm：Termux 下 pnpm 报 lock_shared() not supported
+npm install          # 仓库统一用 npm（锁文件是 package-lock.json）
 npm run dev          # http://127.0.0.1:5173/logshare/，/v1 与 /health 已代理到 8788
 npm run build        # → web/dist
 npm run typecheck    # vue-tsc
